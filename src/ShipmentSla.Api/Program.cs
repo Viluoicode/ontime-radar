@@ -6,6 +6,8 @@
 //   GET  /sla/summary?days=30&groupBy=carrier|region   late-delivery rate from the event lake (Athena)
 //   GET  /sla/trend?days=30&carrier=                   per delivery day: volume, late %, avg delivery days
 //   GET  /health
+// Auth: webhook = shared secret; /health = public; all other GETs = Cognito login
+//       (CSKH: /shipments*, Quản lý: everything) – see AccessRules.
 // (API nhận webhook, chuẩn hóa rồi đẩy vào hàng đợi; xử lý nặng nằm ở Processor.)
 using System.Security.Cryptography;
 using System.Text;
@@ -94,7 +96,7 @@ app.MapGet("/shipments/{carrier}/{trackingCode}", async (
 {
     var timeline = await store.GetTimelineAsync(ShipmentKeys.Build(carrier.ToLowerInvariant(), trackingCode), ct);
     return timeline is null ? Results.NotFound() : Results.Ok(timeline);
-});
+}).AddEndpointFilter(Require(AccessArea.Tracking));
 
 // ---------------- Event-lake (Athena) endpoints for the dashboard ----------------
 // All inputs are validated in LakeQueries before any SQL is built (no SQL injection).
@@ -115,7 +117,7 @@ app.MapGet("/shipments", async (
     if (LakeQueries.Validate(query) is { } error) return Results.BadRequest(new { error });
 
     return await Lake(log, "shipment list", async () => new { query, rows = await lake.ShipmentsAsync(query, ct) });
-});
+}).AddEndpointFilter(Require(AccessArea.Tracking));
 
 app.MapGet("/sla/summary", async (
     LakeQueryService lake, ILogger<Program> log, CancellationToken ct, int days = 30, string groupBy = "carrier") =>
@@ -125,7 +127,7 @@ app.MapGet("/sla/summary", async (
         return Results.BadRequest(new { error = "groupBy must be 'carrier' or 'region'" });
 
     return await Lake(log, "SLA summary", async () => new { days, groupBy = column, rows = await lake.SummaryAsync(column, days, ct) });
-});
+}).AddEndpointFilter(Require(AccessArea.SlaReports));
 
 app.MapGet("/sla/trend", async (
     LakeQueryService lake, ILogger<Program> log, CancellationToken ct, int days = 30, string? carrier = null) =>
@@ -134,9 +136,38 @@ app.MapGet("/sla/trend", async (
         return Results.BadRequest(new { error });
 
     return await Lake(log, "SLA trend", async () => new { days, carrier, rows = await lake.TrendAsync(days, carrier, ct) });
-});
+}).AddEndpointFilter(Require(AccessArea.SlaReports));
 
 app.Run();
+
+// ---------------- Role check (second layer after API Gateway's JWT authorizer) ----------------
+// API Gateway already rejects missing/invalid/expired tokens with 401. Here we read the verified
+// claims it passes along and allow the call only for the right Cognito group (else 403).
+static Func<EndpointFilterInvocationContext, EndpointFilterDelegate, ValueTask<object?>> Require(AccessArea area) =>
+    async (ctx, next) =>
+    {
+        var claims = VerifiedClaims(ctx.HttpContext);
+        if (claims is null) return Results.Unauthorized();   // e.g. route deployed without the authorizer
+
+        var groups = AccessRules.ParseGroups(claims.TryGetValue(AccessRules.GroupsClaim, out var g) ? g : null);
+        return AccessRules.CanAccess(area, groups)
+            ? await next(ctx)
+            : Results.Json(new { error = $"your account has no access to {area} (groups: [{string.Join(", ", groups)}])" },
+                statusCode: StatusCodes.Status403Forbidden);
+    };
+
+// Claims verified by the API Gateway JWT authorizer, taken from the original Lambda event.
+static IDictionary<string, string>? VerifiedClaims(HttpContext http)
+{
+    if (http.Items["LambdaRequestObject"] is Amazon.Lambda.APIGatewayEvents.APIGatewayHttpApiV2ProxyRequest req
+        && req.RequestContext?.Authorizer?.Jwt?.Claims is { Count: > 0 } jwtClaims)
+        return jwtClaims;
+
+    // Fallback: the Lambda ASP.NET Core bridge may also expose them as the request's User.
+    return http.User.Identity?.IsAuthenticated == true
+        ? http.User.Claims.GroupBy(c => c.Type).ToDictionary(g => g.Key, g => g.First().Value)
+        : null;
+}
 
 // Shared error handling for Athena-backed endpoints: timeout → 504, anything else → 500 (details only in logs).
 static async Task<IResult> Lake(ILogger log, string what, Func<Task<object>> run)

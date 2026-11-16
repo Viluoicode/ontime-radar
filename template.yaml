@@ -36,6 +36,10 @@ Parameters:
     Type: String
     Default: "*"
     Description: Website origin allowed to call the API from a browser (e.g. https://dxxxx.cloudfront.net). "*" = any.
+  DashboardUrl:
+    Type: String
+    Default: "http://localhost:5500/"
+    Description: Where Cognito's login page sends users back to (the website). localhost until the CloudFront site exists.
 
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
@@ -58,8 +62,91 @@ Globals:
       AllowMethods: [GET, OPTIONS]
       AllowHeaders: [authorization, content-type]
       MaxAge: 600
+    # Every route needs a valid Cognito access token unless the route says Authorizer: NONE.
+    # API Gateway verifies signature, expiry, issuer and client id → 401 before Lambda runs.
+    # The role (cskh / manager) is checked in the API code (AccessRules) → 403.
+    Auth:
+      DefaultAuthorizer: CognitoJwt
+      Authorizers:
+        CognitoJwt:
+          IdentitySource: $request.header.Authorization
+          JwtConfiguration:
+            issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+            audience: [!Ref UserPoolClient]
 
 Resources:
+  # ---------------- Users (Cognito) ----------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]                  # log in with email
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true             # no self sign-up: an admin creates staff accounts
+      MfaConfiguration: OPTIONAL                   # users may turn on an authenticator app
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]            # no SMS (costs money + needs SMS sandbox exit)
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms: [{ Name: verified_email, Priority: 1 }]
+
+  CskhGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: cskh
+      Description: "CSKH – look up shipments and lists"
+
+  ManagerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: manager
+      Description: "Quản lý – everything CSKH can do + SLA reports"
+
+  # Public client (no secret): used by the website (login page, code + PKCE) and by scripts.
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: dashboard
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED          # same error for "no such user" and "wrong password"
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 7
+      TokenValidityUnits: { AccessToken: hours, IdToken: hours, RefreshToken: days }
+      EnableTokenRevocation: true
+      SupportedIdentityProviders: [COGNITO]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: [!Ref DashboardUrl]
+      LogoutURLs: [!Ref DashboardUrl]
+
+  # Cognito-hosted login page: https://<prefix>.auth.<region>.amazoncognito.com
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub "${AWS::StackName}-${AWS::AccountId}"
+      ManagedLoginVersion: 2
+
+  LoginPageBranding:   # managed login v2 needs a style; use Cognito's default look
+    Type: AWS::Cognito::ManagedLoginBranding
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
   # ---------------- Storage ----------------
   ShipmentsTable:
     Type: AWS::DynamoDB::Table
@@ -147,16 +234,23 @@ Resources:
       # CORS preflight (OPTIONS) and send it to Lambda (→ 405). Without an OPTIONS route,
       # API Gateway answers preflight itself using CorsConfiguration (Globals).
       Events:
-        ReadRoutes:
+        ReadRoutes:                     # needs Cognito login (DefaultAuthorizer)
           Type: HttpApi                 # creates the implicit "ServerlessHttpApi"
           Properties:
             Path: /{proxy+}
             Method: GET
-        WebhookRoute:
+        HealthRoute:                    # public: uptime checks
+          Type: HttpApi
+          Properties:
+            Path: /health
+            Method: GET
+            Auth: { Authorizer: NONE }
+        WebhookRoute:                   # carriers authenticate with X-Webhook-Secret, not Cognito
           Type: HttpApi
           Properties:
             Path: /carriers/{carrier}/webhook
             Method: POST
+            Auth: { Authorizer: NONE }
 
   ProcessorFunction:
     Type: AWS::Serverless::Function
@@ -340,6 +434,14 @@ Outputs:
     Value: !Ref EventsQueue
   EventsDlqUrl:
     Value: !Ref EventsDlq
+  UserPoolId:
+    Description: Create staff accounts here (see README "Đăng nhập")
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  LoginUrl:
+    Description: Cognito-hosted login page (the website redirects here)
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&scope=openid+email+profile&redirect_uri=${DashboardUrl}"
   AthenaWorkGroupName:
     Value: !Ref AthenaWorkGroup
   LakeDatabaseName:

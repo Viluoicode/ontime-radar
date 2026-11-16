@@ -1,12 +1,16 @@
 ﻿# Demo giá trị thực tế của Shipment SLA Service – chạy trên hệ thống đã deploy.
 # Mỗi cảnh ứng với 1 "nỗi đau" trong docs/product.md.
 #
-#   .\tools\demo.ps1               # cả 5 cảnh (cảnh 4 sẽ gửi email cảnh báo thật)
-#   .\tools\demo.ps1 -SkipAlarm    # bỏ cảnh 4
-#   .\tools\demo.ps1 -NoPause      # chạy liền một mạch, không chờ Enter
+#   .\tools\demo.ps1 -Email quanly@example.com              # cả 5 cảnh (cảnh 4 gửi email cảnh báo thật)
+#   .\tools\demo.ps1 -Email quanly@example.com -SkipAlarm   # bỏ cảnh 4
+#   .\tools\demo.ps1 -Email quanly@example.com -NoPause     # chạy liền một mạch, không chờ Enter
+#   .\tools\demo.ps1 -Token $token                          # dùng token có sẵn (get-token.ps1)
 #
+# -Email: tài khoản nhóm "manager" (cảnh 5 cần quyền xem báo cáo SLA). Mật khẩu được hỏi ẩn.
 # Đơn demo có mã bắt đầu bằng DEMO → không tính vào báo cáo SLA (/sla/summary).
 param(
+    [string]$Email,                  # tài khoản Quản lý (nhóm manager)
+    [string]$Token,                  # hoặc truyền sẵn access token (chạy tự động, không hỏi mật khẩu)
     [string]$StackName = "shipment-sla",
     [switch]$SkipAlarm,
     [switch]$NoPause
@@ -23,7 +27,12 @@ function Pause-Demo   { Write-Host ""; if (-not $NoPause) { Read-Host "  [Enter]
 $api = aws cloudformation describe-stacks --stack-name $StackName --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text
 $fn = aws cloudformation describe-stack-resource --stack-name $StackName --logical-resource-id ApiFunction --query StackResourceDetail.PhysicalResourceId --output text
 $secret = aws lambda get-function-configuration --function-name $fn --query Environment.Variables.WEBHOOK_SECRET --output text
-$headers = @{ "X-Webhook-Secret" = $secret }
+$headers = @{ "X-Webhook-Secret" = $secret }            # hãng vận chuyển gửi webhook
+if (-not $Token) {
+    if (-not $Email) { $Email = Read-Host "Email tài khoản Quản lý (nhóm manager)" }
+    $Token = & "$PSScriptRoot\get-token.ps1" -Email $Email -StackName $StackName
+}
+$auth = @{ Authorization = "Bearer $Token" }            # nhân viên đọc dữ liệu (Cognito)
 $run = Get-Date -Format "MMddHHmmss"           # mã riêng cho mỗi lần chạy → chạy lại bao nhiêu lần cũng được
 $today = [DateTime]::UtcNow.Date
 
@@ -35,7 +44,14 @@ $inv = [Globalization.CultureInfo]::InvariantCulture
 function Iso($d)   { $d.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", $inv) }
 function Day($d)   { $d.ToString("yyyy-MM-dd", $inv) }
 function Epoch($d) { [DateTimeOffset]::new($d, [TimeSpan]::Zero).ToUnixTimeMilliseconds() }
-function Lookup($carrier, $code) { Invoke-RestMethod "$api/shipments/$carrier/$code" }
+# Processing is asynchronous (API → SQS → Processor): right after a deploy the processor cold-starts,
+# so a shipment may need a few more seconds to appear. Retry 404 for up to ~20 s.
+function Lookup($carrier, $code) {
+    for ($i = 1; ; $i++) {
+        try { return Invoke-RestMethod "$api/shipments/$carrier/$code" -Headers $auth }
+        catch { if ($i -ge 10 -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }; Start-Sleep 2 }
+    }
+}
 
 Write-Host ""
 Write-Host "  SHIPMENT SLA SERVICE – DEMO   (API: $api, lượt chạy $run)" -ForegroundColor White
@@ -86,9 +102,9 @@ foreach ($s in $steps) {
     Send "ghn" $p
     Note ("  {0}. {1,-14} {2:dd/MM HH:mm}  {3}" -f $i, $s[0], $s[1], $s[2])
 }
-Start-Sleep 6
-
-$r = Lookup "ghn" $code
+Start-Sleep 4
+# 8 webhooks → 7 stored events (the retry is dropped). Wait until all of them are processed.
+for ($i = 0; $i -lt 10; $i++) { $r = Lookup "ghn" $code; if (@($r.events).Count -ge 7) { break }; Start-Sleep 2 }
 Write-Host ""
 Write-Host "  Kết quả hệ thống xử lý:" -ForegroundColor White
 $meaning = @{ Applied = "cập nhật trạng thái"; Rejected = "chặn, chỉ lưu lịch sử"; Stale = "cũ, chỉ lưu lịch sử" }
@@ -162,12 +178,12 @@ Title "CẢNH 5 · Chọn hãng bằng số liệu, không theo cảm tính"
 Note "Vấn đề: không biết hãng nào / khu vực nào hay giao trễ để đàm phán hoặc chuyển hãng."
 Note "Truy vấn Athena trên toàn bộ sự kiện thật (đã loại đơn demo)..."
 
-$byCarrier = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=carrier"
+$byCarrier = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=carrier" -Headers $auth
 $byCarrier.rows | ForEach-Object {
     [pscustomobject]@{ "Hãng" = $_.group.ToUpper(); "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent); "Đúng hạn" = ("{0:N1}%" -f (100 - $_.latePercent)) }
 } | Format-Table -AutoSize | Out-String | Write-Host
 
-$byRegion = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=region"
+$byRegion = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=region" -Headers $auth
 Note "Khu vực có tỉ lệ trễ cao nhất (có ít nhất 3 đơn đã giao):"
 $byRegion.rows | Where-Object { $_.delivered -ge 3 } | Select-Object -First 5 | ForEach-Object {
     [pscustomobject]@{ "Bang" = $_.group; "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent) }

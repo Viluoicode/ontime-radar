@@ -73,7 +73,35 @@ sam deploy --guided
 ```
 
 Sau khi deploy: **mở email, bấm Confirm subscription** của SNS. Ghi lại các Outputs
-(`ApiUrl`, `DataBucketName`, `TableName`, `ReplayerFunctionName`).
+(`ApiUrl`, `DataBucketName`, `TableName`, `ReplayerFunctionName`, `UserPoolId`).
+
+## 2b. Đăng nhập (Cognito)
+
+Xem dữ liệu cần đăng nhập; webhook của hãng vẫn dùng `X-Webhook-Secret`, `/health` công khai.
+
+| Chức năng | Chưa đăng nhập | Chưa gán nhóm | `cskh` (CSKH) | `manager` (Quản lý) |
+| --- | --- | --- | --- | --- |
+| `GET /shipments`, `GET /shipments/{carrier}/{tracking}` | 401 | 403 | ✅ | ✅ |
+| `GET /sla/summary`, `GET /sla/trend` | 401 | 403 | 403 | ✅ |
+
+Không có tự đăng ký – admin tạo tài khoản, Cognito gửi **mật khẩu tạm** qua email:
+
+```powershell
+$pool = "<UserPoolId>"
+aws cognito-idp admin-create-user --user-pool-id $pool --username nhanvien@example.com `
+  --user-attributes Name=email,Value=nhanvien@example.com Name=email_verified,Value=true
+aws cognito-idp admin-add-user-to-group --user-pool-id $pool --username nhanvien@example.com --group-name cskh   # hoặc manager
+```
+
+Lấy token (lần đầu sẽ bắt đổi mật khẩu tạm; có MFA thì hỏi mã 6 số; token hạn 1 giờ):
+
+```powershell
+$token = .\tools\get-token.ps1 -Email nhanvien@example.com
+$auth  = @{ Authorization = "Bearer $token" }
+```
+
+MFA (app Authenticator) là **tuỳ chọn**, mỗi người tự bật. Trang đăng nhập của Cognito (dùng cho website)
+nằm ở Output `LoginUrl`.
 
 ## 3. Smoke test API
 
@@ -89,8 +117,9 @@ Invoke-RestMethod -Method Post "$api/carriers/ghn/webhook" -Headers $h -ContentT
 Invoke-RestMethod -Method Post "$api/carriers/ghn/webhook" -Headers $h -ContentType "application/json" -InFile tools/sample-webhook-ghn-delivered.json
 
 Start-Sleep 5
-Invoke-RestMethod "$api/shipments/ghn/GHNTEST001" | ConvertTo-Json -Depth 5
+Invoke-RestMethod "$api/shipments/ghn/GHNTEST001" -Headers $auth | ConvertTo-Json -Depth 5   # $auth: mục 2b
 # → status Delivered, isLate true, 2 events Applied
+# Không có token → 401
 
 # Gửi lại đúng webhook cũ → không tạo trùng (idempotent)
 Invoke-RestMethod -Method Post "$api/carriers/ghn/webhook" -Headers $h -ContentType "application/json" -InFile tools/sample-webhook-ghn.json
@@ -140,14 +169,15 @@ Bảng Glue `events` dùng **partition projection** theo `dt`, nên dữ liệu 
 không cần crawler hay `MSCK REPAIR`.
 
 ```powershell
-Invoke-RestMethod "$api/sla/summary"                          # 30 ngày, theo hãng
-Invoke-RestMethod "$api/sla/summary?days=7&groupBy=region"    # 7 ngày, theo bang
+# $auth: token của tài khoản manager (mục 2b). /shipments dùng được cả tài khoản cskh.
+Invoke-RestMethod "$api/sla/summary" -Headers $auth                          # 30 ngày, theo hãng
+Invoke-RestMethod "$api/sla/summary?days=7&groupBy=region" -Headers $auth    # 7 ngày, theo bang
 # → { days, groupBy, rows: [ { group, delivered, late, latePercent } ] }
 
-Invoke-RestMethod "$api/sla/trend?carrier=ghn"                # theo ngày giao: số đơn, % trễ, số ngày giao TB
-Invoke-RestMethod "$api/shipments?late=true&limit=20"         # danh sách đơn đã giao trễ
-Invoke-RestMethod "$api/shipments?status=InTransit&carrier=jt&region=SP"
-Invoke-RestMethod "$api/shipments?overdue=true"               # đơn chưa xong nhưng đã quá ngày hẹn
+Invoke-RestMethod "$api/sla/trend?carrier=ghn" -Headers $auth                # theo ngày giao: số đơn, % trễ, số ngày giao TB
+Invoke-RestMethod "$api/shipments?late=true&limit=20" -Headers $auth         # danh sách đơn đã giao trễ
+Invoke-RestMethod "$api/shipments?status=InTransit&carrier=jt&region=SP" -Headers $auth
+Invoke-RestMethod "$api/shipments?overdue=true" -Headers $auth               # đơn chưa xong nhưng đã quá ngày hẹn
 ```
 
 | Endpoint | Tham số (đều tuỳ chọn) |
@@ -171,8 +201,9 @@ GROUP BY carrier;
 ## 5c. Demo giá trị thực tế
 
 ```powershell
-.\tools\demo.ps1              # 5 cảnh, Enter để chuyển cảnh (cảnh 4 gửi email cảnh báo thật)
-.\tools\demo.ps1 -SkipAlarm   # bỏ cảnh cảnh báo email
+.\tools\demo.ps1 -Email quanly@example.com              # 5 cảnh, Enter để chuyển cảnh (cảnh 4 gửi email cảnh báo thật)
+.\tools\demo.ps1 -Email quanly@example.com -SkipAlarm   # bỏ cảnh cảnh báo email
+# -Email: tài khoản nhóm manager, mật khẩu được hỏi ẩn
 ```
 
 | Cảnh | Nỗi đau | Hệ thống chứng minh |
@@ -205,6 +236,8 @@ GROUP BY carrier;
 | **Serverless, arm64, on-demand** | Không VPC/NAT, trả theo request; log giữ 14 ngày |
 | **Athena + partition projection** | Phân tích SLA trên S3, không cần crawler; lọc theo `dt` để chỉ quét phần dữ liệu cần; workgroup chặn ở 1 GB/query |
 | **Whitelist `groupBy`, `days` là số nguyên** | Không đưa chuỗi người dùng nhập vào SQL (chống SQL injection) |
+| **Cognito + JWT authorizer của API Gateway** | Token sai/hết hạn bị chặn ở cổng (401) trước khi tốn tiền chạy Lambda; không tự viết code kiểm tra chữ ký |
+| **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
 
 ## 8. Chi phí & dọn dẹp
 
@@ -221,7 +254,9 @@ sam delete --stack-name shipment-sla
 
 - [x] Tuần 1: webhook 3 hãng, SQS FIFO, Processor, DynamoDB, Replayer, alarm trễ + DLQ
 - [x] Tuần 2: Glue Data Catalog + Athena (`GET /sla/summary`), GitHub Actions CI
-- [ ] (tuỳ chọn) Cognito JWT authorizer cho `/shipments` và `/sla`
+- [x] API cho dashboard: `GET /shipments` (danh sách), `GET /sla/trend`, CORS
+- [x] Cognito: đăng nhập, 2 vai trò CSKH / Quản lý, MFA tuỳ chọn
+- [ ] Website dashboard (S3 + CloudFront)
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo
