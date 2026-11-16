@@ -2,7 +2,9 @@
 // On AWS it runs inside Lambda behind API Gateway (HTTP API); locally `dotnet run` uses Kestrel.
 //   POST /carriers/{carrier}/webhook        carrier pushes a status → normalize → SQS FIFO
 //   GET  /shipments/{carrier}/{tracking}    current state + full timeline (DynamoDB)
+//   GET  /shipments?status=&carrier=&region=&late=&overdue=&days=&limit=   list for the dashboard (Athena)
 //   GET  /sla/summary?days=30&groupBy=carrier|region   late-delivery rate from the event lake (Athena)
+//   GET  /sla/trend?days=30&carrier=                   per delivery day: volume, late %, avg delivery days
 //   GET  /health
 // (API nhận webhook, chuẩn hóa rồi đẩy vào hàng đợi; xử lý nặng nằm ở Processor.)
 using System.Security.Cryptography;
@@ -14,6 +16,7 @@ using Amazon.SQS;
 using Amazon.SQS.Model;
 using ShipmentSla.Api;
 using ShipmentSla.Core;
+using ShipmentSla.Core.Analytics;
 using ShipmentSla.Core.Carriers;
 using ShipmentSla.Infrastructure;
 
@@ -30,7 +33,7 @@ var tableName = Env("TABLE_NAME");
 var webhookSecret = Env("WEBHOOK_SECRET");
 
 builder.Services.AddSingleton<IAmazonAthena>(_ => new AmazonAthenaClient());
-builder.Services.AddSingleton(sp => new SlaQueryService(
+builder.Services.AddSingleton(sp => new LakeQueryService(
     sp.GetRequiredService<IAmazonAthena>(), Env("ATHENA_DATABASE"), Env("ATHENA_WORKGROUP")));
 builder.Services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient());
 builder.Services.AddSingleton<IAmazonDynamoDB>(_ => new AmazonDynamoDBClient());
@@ -93,16 +96,54 @@ app.MapGet("/shipments/{carrier}/{trackingCode}", async (
     return timeline is null ? Results.NotFound() : Results.Ok(timeline);
 });
 
-app.MapGet("/sla/summary", async (
-    SlaQueryService sla, ILogger<Program> log, CancellationToken ct, int days = 30, string groupBy = "carrier") =>
+// ---------------- Event-lake (Athena) endpoints for the dashboard ----------------
+// All inputs are validated in LakeQueries before any SQL is built (no SQL injection).
+
+app.MapGet("/shipments", async (
+    LakeQueryService lake, ILogger<Program> log, CancellationToken ct,
+    int days = 30, int limit = 50, string? status = null, string? carrier = null, string? region = null,
+    bool late = false, bool overdue = false) =>
 {
-    if (days is < 1 or > 365) return Results.BadRequest(new { error = "days must be 1..365" });
-    if (!SlaQueryService.TryGetColumn(groupBy, out var column))
+    ShipmentStatus? parsedStatus = null;
+    if (status is not null)
+    {
+        if (!LakeQueries.TryParseStatus(status, out var s))
+            return Results.BadRequest(new { error = $"status must be one of: {string.Join(", ", Enum.GetNames<ShipmentStatus>())}" });
+        parsedStatus = s;
+    }
+    var query = new ShipmentQuery(days, limit, parsedStatus, carrier, region, late, overdue);
+    if (LakeQueries.Validate(query) is { } error) return Results.BadRequest(new { error });
+
+    return await Lake(log, "shipment list", async () => new { query, rows = await lake.ShipmentsAsync(query, ct) });
+});
+
+app.MapGet("/sla/summary", async (
+    LakeQueryService lake, ILogger<Program> log, CancellationToken ct, int days = 30, string groupBy = "carrier") =>
+{
+    if (LakeQueries.ValidateDays(days) is { } error) return Results.BadRequest(new { error });
+    if (!LakeQueries.TryGetGroupColumn(groupBy, out var column))
         return Results.BadRequest(new { error = "groupBy must be 'carrier' or 'region'" });
+
+    return await Lake(log, "SLA summary", async () => new { days, groupBy = column, rows = await lake.SummaryAsync(column, days, ct) });
+});
+
+app.MapGet("/sla/trend", async (
+    LakeQueryService lake, ILogger<Program> log, CancellationToken ct, int days = 30, string? carrier = null) =>
+{
+    if ((LakeQueries.ValidateDays(days) ?? LakeQueries.ValidateCarrier(carrier)) is { } error)
+        return Results.BadRequest(new { error });
+
+    return await Lake(log, "SLA trend", async () => new { days, carrier, rows = await lake.TrendAsync(days, carrier, ct) });
+});
+
+app.Run();
+
+// Shared error handling for Athena-backed endpoints: timeout → 504, anything else → 500 (details only in logs).
+static async Task<IResult> Lake(ILogger log, string what, Func<Task<object>> run)
+{
     try
     {
-        var rows = await sla.SummaryAsync(column, days, ct);
-        return Results.Ok(new { days, groupBy = column, rows });
+        return Results.Ok(await run());
     }
     catch (TimeoutException)
     {
@@ -110,9 +151,7 @@ app.MapGet("/sla/summary", async (
     }
     catch (Exception ex)
     {
-        log.LogError(ex, "SLA summary failed");
+        log.LogError(ex, "{What} failed", what);
         return Results.StatusCode(500);
     }
-});
-
-app.Run();
+}

@@ -32,6 +32,10 @@ Parameters:
     Type: Number
     Default: 5
     Description: Alarm when at least this many late deliveries happen within one hour.
+  CorsAllowOrigin:
+    Type: String
+    Default: "*"
+    Description: Website origin allowed to call the API from a browser (e.g. https://dxxxx.cloudfront.net). "*" = any.
 
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
@@ -46,6 +50,14 @@ Globals:
     Environment:
       Variables:
         TABLE_NAME: !Ref ShipmentsTable
+  # Browser access for the dashboard. API Gateway answers CORS preflight (OPTIONS) itself.
+  # Only read methods: carriers call the webhook server-to-server, so POST needs no CORS.
+  HttpApi:
+    CorsConfiguration:
+      AllowOrigins: [!Ref CorsAllowOrigin]
+      AllowMethods: [GET, OPTIONS]
+      AllowHeaders: [authorization, content-type]
+      MaxAge: 600
 
 Resources:
   # ---------------- Storage ----------------
@@ -131,12 +143,20 @@ Resources:
                 - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
                 - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${LakeDatabase}"
                 - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${LakeDatabase}/*"
+      # Explicit methods instead of "ANY /{proxy+}": an ANY route would also catch the browser's
+      # CORS preflight (OPTIONS) and send it to Lambda (→ 405). Without an OPTIONS route,
+      # API Gateway answers preflight itself using CorsConfiguration (Globals).
       Events:
-        AnyRoute:
+        ReadRoutes:
           Type: HttpApi                 # creates the implicit "ServerlessHttpApi"
           Properties:
             Path: /{proxy+}
-            Method: ANY
+            Method: GET
+        WebhookRoute:
+          Type: HttpApi
+          Properties:
+            Path: /carriers/{carrier}/webhook
+            Method: POST
 
   ProcessorFunction:
     Type: AWS::Serverless::Function

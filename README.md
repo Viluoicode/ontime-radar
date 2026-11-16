@@ -143,7 +143,21 @@ không cần crawler hay `MSCK REPAIR`.
 Invoke-RestMethod "$api/sla/summary"                          # 30 ngày, theo hãng
 Invoke-RestMethod "$api/sla/summary?days=7&groupBy=region"    # 7 ngày, theo bang
 # → { days, groupBy, rows: [ { group, delivered, late, latePercent } ] }
+
+Invoke-RestMethod "$api/sla/trend?carrier=ghn"                # theo ngày giao: số đơn, % trễ, số ngày giao TB
+Invoke-RestMethod "$api/shipments?late=true&limit=20"         # danh sách đơn đã giao trễ
+Invoke-RestMethod "$api/shipments?status=InTransit&carrier=jt&region=SP"
+Invoke-RestMethod "$api/shipments?overdue=true"               # đơn chưa xong nhưng đã quá ngày hẹn
 ```
+
+| Endpoint | Tham số (đều tuỳ chọn) |
+| --- | --- |
+| `GET /shipments` | `days` 1–365 · `limit` 1–200 · `status` (tên trạng thái) · `carrier` ghn/ghtk/jt · `region` 2–10 chữ cái · `late` · `overdue` |
+| `GET /sla/summary` | `days` · `groupBy` carrier/region |
+| `GET /sla/trend` | `days` · `carrier` |
+
+Tham số sai → **400** kèm lý do. Trình duyệt gọi được API (CORS, chỉ `GET`); giới hạn domain bằng tham số
+`CorsAllowOrigin` khi deploy.
 
 Muốn truy vấn tay thì mở Athena Console, chọn workgroup `shipment-sla-wg`, database `shipment_sla_lake`:
 
