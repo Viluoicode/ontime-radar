@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Shipment Tracking & Delivery SLA Service – multi-carrier webhooks, ordered processing
+  (SQS FIFO), DynamoDB state + history, S3 event lake, late-delivery alerting, Olist replayer.
+
+# ---------------------------------------------------------------------------
+# Parameters – set them on the first `sam deploy --guided` (stored in samconfig.toml)
+# ---------------------------------------------------------------------------
+Parameters:
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Shared secret carriers send in the X-Webhook-Secret header (min 16 chars).
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email for SLA / DLQ alarms (leave empty to skip). Confirm the SNS email after deploy.
+  ReplayState:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Turn the 15-minute Olist replay schedule on/off.
+  OrdersPerRun:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 200
+    Description: Olist orders replayed per scheduler run.
+  LateAlarmThreshold:
+    Type: Number
+    Default: 5
+    Description: Alarm when at least this many late deliveries happen within one hour.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+# Settings shared by every function.
+Globals:
+  Function:
+    Runtime: dotnet10
+    Architectures: [arm64]         # Graviton: ~20% cheaper than x86 for the same duration
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ShipmentsTable
+
+Resources:
+  # ---------------- Storage ----------------
+  ShipmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST   # on-demand: pay per request, no capacity planning
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false   # turn on for production; off keeps the lab cheap
+
+  # One bucket: dataset/ (Olist chunks for the replayer) + events/ (event lake for Athena).
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DataBucketPolicy:   # refuse plain-HTTP access
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt DataBucket.Arn, !Sub "${DataBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  # ---------------- Queue (FIFO = in-order per shipment) ----------------
+  EventsDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600   # 14 days to investigate failures
+
+  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      VisibilityTimeout: 180            # ≥ 6 × processor timeout (AWS recommendation)
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventsDlq.Arn
+        maxReceiveCount: 5
+
+  # ---------------- Functions ----------------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/ShipmentSla.Api/
+      Handler: ShipmentSla.Api        # executable assembly (Minimal API + Lambda hosting)
+      Timeout: 29                     # HTTP API hard limit is 30 s (Athena queries need a few seconds)
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref EventsQueue
+          WEBHOOK_SECRET: !Ref WebhookSecret
+          ATHENA_DATABASE: !Ref LakeDatabase
+          ATHENA_WORKGROUP: !Ref AthenaWorkGroup
+      Policies:
+        - SQSSendMessagePolicy: { QueueName: !GetAtt EventsQueue.QueueName }
+        - DynamoDBReadPolicy: { TableName: !Ref ShipmentsTable }
+        - S3CrudPolicy: { BucketName: !Ref DataBucket }   # read the lake + write Athena results (athena-results/)
+        - Statement:
+            - Effect: Allow
+              Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults]
+              Resource: !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}"
+            - Effect: Allow
+              Action: [glue:GetDatabase, glue:GetTable, glue:GetPartitions]
+              Resource:
+                - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${LakeDatabase}"
+                - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${LakeDatabase}/*"
+      Events:
+        AnyRoute:
+          Type: HttpApi                 # creates the implicit "ServerlessHttpApi"
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/ShipmentSla.Processor/
+      Handler: ShipmentSla.Processor::ShipmentSla.Processor.Function::Handler
+      Environment:
+        Variables:
+          LAKE_BUCKET: !Ref DataBucket
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ShipmentsTable }
+        - S3WritePolicy: { BucketName: !Ref DataBucket }
+        - CloudWatchPutMetricPolicy: {}
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventsQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]   # retry only failed messages
+
+  ReplayerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/ShipmentSla.Replayer/
+      Handler: ShipmentSla.Replayer::ShipmentSla.Replayer.Function::Handler
+      Timeout: 120
+      Environment:
+        Variables:
+          DATASET_BUCKET: !Ref DataBucket
+          DATASET_PREFIX: dataset/chunks/
+          CHUNK_SIZE: "500"
+          ORDERS_PER_RUN: !Ref OrdersPerRun
+          API_BASE_URL: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+          WEBHOOK_SECRET: !Ref WebhookSecret
+      Policies:
+        - S3ReadPolicy: { BucketName: !Ref DataBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref ShipmentsTable }
+      Events:
+        Every15Minutes:
+          Type: ScheduleV2              # EventBridge Scheduler
+          Properties:
+            ScheduleExpression: rate(15 minutes)
+            State: !Ref ReplayState
+            Input: "{}"
+
+  # Keep logs 14 days instead of forever (cost control).
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub "/aws/lambda/${ApiFunction}", RetentionInDays: 14 }
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub "/aws/lambda/${ProcessorFunction}", RetentionInDays: 14 }
+  ReplayerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub "/aws/lambda/${ReplayerFunction}", RetentionInDays: 14 }
+
+  # ---------------- Analytics: Glue catalog + Athena over s3://bucket/events/ ----------------
+  LakeDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: shipment_sla_lake      # underscores only: Athena needs no quoting
+
+  # Partition projection: Athena derives dt=YYYY-MM-DD itself → no crawler / MSCK REPAIR needed.
+  EventsLakeTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref LakeDatabase
+      TableInput:
+        Name: events
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - { Name: dt, Type: string }
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.dt.type: date
+          projection.dt.format: yyyy-MM-dd
+          projection.dt.range: "2026-01-01,NOW"
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: DAYS
+          storage.location.template: !Sub "s3://${DataBucket}/events/dt=${!dt}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataBucket}/events/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters: { "ignore.malformed.json": "true" }
+          Columns:
+            - { Name: eventid, Type: string }
+            - { Name: shipmentid, Type: string }
+            - { Name: carrier, Type: string }
+            - { Name: trackingcode, Type: string }
+            - { Name: orderid, Type: string }
+            - { Name: status, Type: string }
+            - { Name: rawstatus, Type: string }
+            - { Name: occurredat, Type: string }
+            - { Name: receivedat, Type: string }
+            - { Name: processedat, Type: string }
+            - { Name: region, Type: string }
+            - { Name: location, Type: string }
+            - { Name: estimateddelivery, Type: string }
+            - { Name: outcome, Type: string }
+            - { Name: reason, Type: string }
+            - { Name: currentstatus, Type: string }
+            - { Name: islate, Type: boolean }
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-wg"
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 1073741824     # 1 GB cap → a runaway query cannot cost much
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${DataBucket}/athena-results/"
+
+  # ---------------- Alerting ----------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  LateDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Too many shipments delivered after the promised date in the last hour.
+      Namespace: ShipmentSla
+      MetricName: LateDeliveries
+      Dimensions: [{ Name: Service, Value: shipment-sla }]
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref LateAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  DlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Events failed 5 times and landed in the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt EventsDlq.QueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  DataBucketName:
+    Description: Upload the prepared Olist chunks to s3://<this>/dataset/chunks/
+    Value: !Ref DataBucket
+  TableName:
+    Value: !Ref ShipmentsTable
+  EventsQueueUrl:
+    Value: !Ref EventsQueue
+  EventsDlqUrl:
+    Value: !Ref EventsDlq
+  AthenaWorkGroupName:
+    Value: !Ref AthenaWorkGroup
+  LakeDatabaseName:
+    Value: !Ref LakeDatabase
+  ReplayerFunctionName:
+    Description: Invoke manually for a test run before enabling the schedule
+    Value: !Ref ReplayerFunction

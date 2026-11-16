@@ -1,0 +1,7 @@
+order_id,customer_id,order_status,order_purchase_timestamp,order_approved_at,order_delivered_carrier_date,order_delivered_customer_date,order_estimated_delivery_date
+sample-order-001,cust-001,delivered,2017-10-02 10:56:33,2017-10-02 11:07:15,2017-10-04 19:55:00,2017-10-10 21:25:13,2017-10-18 00:00:00
+sample-order-002,cust-002,delivered,2017-10-03 09:00:00,2017-10-03 09:30:00,2017-10-05 14:00:00,2017-10-24 16:10:00,2017-10-20 00:00:00
+sample-order-003,cust-003,shipped,2017-10-04 18:20:00,2017-10-04 18:40:00,2017-10-06 10:00:00,,2017-10-25 00:00:00
+sample-order-004,cust-004,canceled,2017-10-05 08:00:00,,,,2017-10-26 00:00:00
+sample-order-005,cust-005,processing,2017-10-06 12:00:00,2017-10-06 12:10:00,,,2017-10-27 00:00:00
+sample-order-006,cust-006,delivered,2017-10-07 15:00:00,2017-10-07 15:05:00,2017-10-15 09:00:00,2017-10-12 17:00:00,2017-10-28 00:00:00

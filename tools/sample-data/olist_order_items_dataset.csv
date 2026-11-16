@@ -1,0 +1,8 @@
+order_id,order_item_id,product_id,seller_id,shipping_limit_date,price,freight_value
+sample-order-001,1,prod-1,seller-a,2017-10-06 11:07:15,58.90,13.29
+sample-order-002,1,prod-2,seller-b,2017-10-07 09:30:00,120.00,25.10
+sample-order-002,2,prod-3,seller-a,2017-10-07 09:30:00,35.00,25.10
+sample-order-003,1,prod-4,seller-a,2017-10-08 18:40:00,79.90,18.00
+sample-order-004,1,prod-5,seller-b,2017-10-09 08:00:00,15.50,9.90
+sample-order-005,1,prod-6,seller-a,2017-10-10 12:10:00,42.00,11.00
+sample-order-006,1,prod-7,seller-b,2017-10-11 15:05:00,99.00,20.00

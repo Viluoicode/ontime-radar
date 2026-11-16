@@ -1,0 +1,7 @@
+customer_id,customer_unique_id,customer_zip_code_prefix,customer_city,customer_state
+cust-001,u-001,01000,sao paulo,SP
+cust-002,u-002,20000,rio de janeiro,RJ
+cust-003,u-003,30000,belo horizonte,MG
+cust-004,u-004,80000,curitiba,PR
+cust-005,u-005,90000,porto alegre,RS
+cust-006,u-006,40000,salvador,BA

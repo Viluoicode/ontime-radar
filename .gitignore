@@ -1,0 +1,20 @@
+# .NET build output
+bin/
+obj/
+*.user
+.vs/
+.idea/
+TestResults/
+
+# SAM
+.aws-sam/
+samconfig.toml          # contains your WebhookSecret after `sam deploy --guided`
+
+# Data (Olist is large and has its own license – do not commit it)
+data/
+
+# Python
+__pycache__/
+.venv/
+
+.fake

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- ASP.NET Core Minimal API that runs on Lambda (and locally with `dotnet run`). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AWSProjectType>Lambda</AWSProjectType>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="1.*" />
+    <PackageReference Include="AWSSDK.SQS" Version="3.7.*" />
+    <PackageReference Include="AWSSDK.Athena" Version="3.7.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ShipmentSla.Core\ShipmentSla.Core.csproj" />
+    <ProjectReference Include="..\ShipmentSla.Infrastructure\ShipmentSla.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,19 @@
+# Copy to samconfig.toml (git-ignored): `Copy-Item samconfig.example.toml samconfig.toml`
+# `sam deploy --guided` then saves your parameters (incl. WebhookSecret) into samconfig.toml.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "shipment-sla"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+region = "ap-southeast-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = true
+
+[default.validate.parameters]
+lint = true

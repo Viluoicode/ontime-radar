@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Shared AWS data access (DynamoDB). Used by Api, Processor and Replayer. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Pinned to SDK v3.7 line: v4 changed many value types to nullable. -->
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="3.7.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ShipmentSla.Core\ShipmentSla.Core.csproj" />
+  </ItemGroup>
+</Project>
