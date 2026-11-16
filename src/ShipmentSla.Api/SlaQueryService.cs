@@ -29,6 +29,8 @@ public sealed class SlaQueryService(IAmazonAthena athena, string database, strin
                    round(100.0 * count_if(islate) / count(*), 2) AS late_pct
             FROM events
             WHERE dt >= '{from}' AND status = 'Delivered' AND outcome = 'Applied'
+              AND NOT starts_with(trackingcode, 'DEMO')   -- tools/demo.ps1 shipments
+              AND NOT starts_with(trackingcode, 'GHNTEST') -- README smoke-test shipment
             GROUP BY {column}
             ORDER BY late_pct DESC
             """;

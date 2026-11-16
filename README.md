@@ -154,6 +154,23 @@ WHERE dt >= '2026-11-01' AND status = 'Delivered' AND outcome = 'Applied'
 GROUP BY carrier;
 ```
 
+## 5c. Demo giá trị thực tế
+
+```powershell
+.\tools\demo.ps1              # 5 cảnh, Enter để chuyển cảnh (cảnh 4 gửi email cảnh báo thật)
+.\tools\demo.ps1 -SkipAlarm   # bỏ cảnh cảnh báo email
+```
+
+| Cảnh | Nỗi đau | Hệ thống chứng minh |
+| --- | --- | --- |
+| 1 | Mỗi hãng một định dạng, một mã trạng thái | 3 webhook khác nhau → cùng trạng thái `OutForDelivery` |
+| 2 | Webhook trùng, sai thứ tự, quét nhầm | 8 webhook → trạng thái cuối vẫn `Delivered`; trùng bị loại, cũ = `Stale`, đi lùi = `Rejected` |
+| 3 | CSKH mở nhiều trang để tra 1 đơn | 1 lần gọi API ra toàn bộ timeline của 1 đơn Olist thật |
+| 4 | Biết giao trễ khi khách phàn nàn | 5 đơn trễ / giờ → alarm → email trong vài phút |
+| 5 | Chọn hãng theo cảm tính | Tỉ lệ đúng hạn theo hãng & bang từ Athena |
+
+Đơn demo có mã bắt đầu bằng `DEMO` và **không tính vào** `/sla/summary`.
+
 ## 6. Kiểm tra hằng ngày (5 phút)
 
 - CloudWatch → Lambda `ReplayerFunction`: có chạy mỗi 15 phút, `Failed = 0`.
@@ -191,6 +208,8 @@ sam delete --stack-name shipment-sla
 - [x] Tuần 1: webhook 3 hãng, SQS FIFO, Processor, DynamoDB, Replayer, alarm trễ + DLQ
 - [x] Tuần 2: Glue Data Catalog + Athena (`GET /sla/summary`), GitHub Actions CI
 - [ ] (tuỳ chọn) Cognito JWT authorizer cho `/shipments` và `/sla`
+- [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
+- [x] Script demo `tools/demo.ps1`
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo
 
 ## Dữ liệu
