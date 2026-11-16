@@ -8,7 +8,9 @@ TestResults/
 
 # SAM
 .aws-sam/
-samconfig.toml          # contains your WebhookSecret after `sam deploy --guided`
+# samconfig.toml contains your WebhookSecret after `sam deploy --guided`
+# (gitignore has no end-of-line comments: a "#" after a pattern is part of the pattern)
+samconfig.toml
 
 # Data (Olist is large and has its own license – do not commit it)
 data/
