@@ -157,6 +157,10 @@ Resources:
             Queue: !GetAtt EventsQueue.Arn
             BatchSize: 10
             FunctionResponseTypes: [ReportBatchItemFailures]   # retry only failed messages
+            # New accounts may only run 10 Lambdas at once in total. Without a cap the processor
+            # takes all 10 (one per FIFO group) and the API gets throttled → 503 for carriers.
+            ScalingConfig:
+              MaximumConcurrency: 2
 
   ReplayerFunction:
     Type: AWS::Serverless::Function

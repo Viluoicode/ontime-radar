@@ -7,7 +7,7 @@ stack_name = "shipment-sla"
 
 [default.build.parameters]
 cached = true
-parallel = true
+parallel = false   # the 3 functions share Core/Infrastructure obj/ folders → parallel builds race
 
 [default.deploy.parameters]
 region = "ap-southeast-1"
