@@ -249,6 +249,15 @@ CORS của API và địa chỉ quay về của Cognito chỉ chấp nhận doma
 
 ## 6. Kiểm tra hằng ngày (5 phút)
 
+Một lệnh, chỉ đọc, ~40 giây – 10 mục ĐẠT / CẢNH BÁO / LỖI kèm gợi ý xử lý (mã thoát 1 nếu có LỖI):
+
+```powershell
+.\tools\daily-check.ps1                            # in kết quả
+.\tools\daily-check.ps1 -SaveTo docs\evidence      # + lưu .txt làm bằng chứng (xem docs/evidence/README.md)
+```
+
+Hoặc xem tay:
+
 - CloudWatch → Lambda `ReplayerFunction`: có chạy mỗi 15 phút, `Failed = 0`.
 - SQS DLQ = 0 message (nếu > 0 sẽ có email cảnh báo).
 - `aws s3 ls s3://$bucket/events/` có thư mục `dt=` của hôm nay.

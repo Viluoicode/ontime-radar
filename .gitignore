@@ -22,3 +22,7 @@ __pycache__/
 .fake
 # Website config generated from stack outputs (tools/make-web-config.ps1)
 web/js/config.js
+
+# Evidence (screenshots, check outputs) stays on this machine – it may show emails / account numbers
+docs/evidence/*
+!docs/evidence/README.md
