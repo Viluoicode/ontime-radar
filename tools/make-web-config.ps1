@@ -6,7 +6,8 @@
 param(
     [string]$StackName = "shipment-sla",
     [string]$Region = "ap-southeast-1",
-    [string]$RedirectUri = "http://localhost:5500/"
+    [string]$RedirectUri = "http://localhost:5500/",
+    [string]$OutFile = (Join-Path $PSScriptRoot "..\web\js\config.js")
 )
 $ErrorActionPreference = "Stop"
 
@@ -24,6 +25,6 @@ export const CONFIG = Object.freeze({
   region: "$Region"
 });
 "@
-$path = Join-Path $PSScriptRoot "..\web\js\config.js"
-[IO.File]::WriteAllText([IO.Path]::GetFullPath($path), $js, (New-Object Text.UTF8Encoding $false))
-Write-Host "Đã ghi web/js/config.js (redirect: $RedirectUri)" -ForegroundColor Green
+$path = [IO.Path]::GetFullPath($OutFile)
+[IO.File]::WriteAllText($path, $js, (New-Object Text.UTF8Encoding $false))
+Write-Host "Đã ghi $path (redirect: $RedirectUri)" -ForegroundColor Green

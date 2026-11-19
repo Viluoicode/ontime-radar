@@ -234,8 +234,18 @@ Chạy thử ở máy (đăng nhập qua trang Cognito, quay về `http://localh
 py -m http.server 5500 --bind 127.0.0.1 --directory web       # mở http://localhost:5500 (dùng "localhost", không phải 127.0.0.1)
 ```
 
+Đưa lên mạng (S3 + CloudFront, link ở Output `WebUrl`):
+
+```powershell
+sam build; sam deploy            # lần đầu tạo bucket web + CloudFront (~5–10 phút)
+.\tools\deploy-web.ps1           # mỗi lần sửa web/: tải lên S3 + xoá cache CloudFront
+```
+
 Bảo mật: đăng nhập OAuth code + PKCE (không có secret trong trình duyệt), token chỉ nằm trong tab
 (sessionStorage), Content-Security-Policy, Chart.js có SRI, mọi dữ liệu từ API đều được escape.
+Trên CloudFront: bucket web **riêng và khoá kín** (chỉ CloudFront đọc được qua OAC), HTTPS bắt buộc,
+header bảo mật (CSP + `frame-ancestors 'none'`, HSTS, `X-Frame-Options`, `nosniff`, `no-referrer`).
+CORS của API và địa chỉ quay về của Cognito chỉ chấp nhận domain CloudFront và `http://localhost:5500`.
 
 ## 6. Kiểm tra hằng ngày (5 phút)
 
@@ -258,6 +268,7 @@ Bảo mật: đăng nhập OAuth code + PKCE (không có secret trong trình duy
 | **Athena + partition projection** | Phân tích SLA trên S3, không cần crawler; lọc theo `dt` để chỉ quét phần dữ liệu cần; workgroup chặn ở 1 GB/query |
 | **Whitelist `groupBy`, `days` là số nguyên** | Không đưa chuỗi người dùng nhập vào SQL (chống SQL injection) |
 | **Cognito + JWT authorizer của API Gateway** | Token sai/hết hạn bị chặn ở cổng (401) trước khi tốn tiền chạy Lambda; không tự viết code kiểm tra chữ ký |
+| **CloudFront + S3 riêng khoá kín (OAC)** | Website chạy HTTPS toàn cầu gần như 0 USD; không ai đọc thẳng được bucket, bucket web tách khỏi dữ liệu đơn hàng |
 | **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
 
 ## 8. Chi phí & dọn dẹp
@@ -278,7 +289,7 @@ sam delete --stack-name shipment-sla
 - [x] API cho dashboard: `GET /shipments` (danh sách), `GET /sla/trend`, CORS
 - [x] Cognito: đăng nhập, 2 vai trò CSKH / Quản lý, MFA tuỳ chọn
 - [x] Website dashboard chạy ở máy (3 trang, đăng nhập Cognito, sáng/tối)
-- [ ] Đưa website lên S3 + CloudFront
+- [x] Đưa website lên S3 + CloudFront
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo

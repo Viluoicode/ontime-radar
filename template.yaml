@@ -32,14 +32,13 @@ Parameters:
     Type: Number
     Default: 5
     Description: Alarm when at least this many late deliveries happen within one hour.
-  CorsAllowOrigin:
+  LocalDevOrigin:
     Type: String
-    Default: "*"
-    Description: Website origin allowed to call the API from a browser (e.g. https://dxxxx.cloudfront.net). "*" = any.
-  DashboardUrl:
-    Type: String
-    Default: "http://localhost:5500/"
-    Description: Where Cognito's login page sends users back to (the website). localhost until the CloudFront site exists.
+    Default: "http://localhost:5500"
+    AllowedPattern: "^http://localhost:[0-9]{2,5}$"
+    Description: >
+      Local copy of the website (py -m http.server) that may also log in and call the API,
+      next to the CloudFront site. Only localhost is accepted.
 
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
@@ -58,7 +57,9 @@ Globals:
   # Only read methods: carriers call the webhook server-to-server, so POST needs no CORS.
   HttpApi:
     CorsConfiguration:
-      AllowOrigins: [!Ref CorsAllowOrigin]
+      AllowOrigins:                       # only our website (CloudFront) and the local dev copy
+        - !Sub "https://${WebDistribution.DomainName}"
+        - !Ref LocalDevOrigin
       AllowMethods: [GET, OPTIONS]
       AllowHeaders: [authorization, content-type]
       MaxAge: 600
@@ -129,8 +130,12 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid, email, profile]
-      CallbackURLs: [!Ref DashboardUrl]
-      LogoutURLs: [!Ref DashboardUrl]
+      CallbackURLs:                       # where the login page may send users back to
+        - !Sub "https://${WebDistribution.DomainName}/"
+        - !Sub "${LocalDevOrigin}/"
+      LogoutURLs:
+        - !Sub "https://${WebDistribution.DomainName}/"
+        - !Sub "${LocalDevOrigin}/"
 
   # Cognito-hosted login page: https://<prefix>.auth.<region>.amazoncognito.com
   UserPoolDomain:
@@ -379,6 +384,101 @@ Resources:
         ResultConfiguration:
           OutputLocation: !Sub "s3://${DataBucket}/athena-results/"
 
+  # ---------------- Website: private S3 bucket behind CloudFront ----------------
+  # Separate from DataBucket: the website can never reach shipment data through S3.
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:       # no public access at all – only CloudFront (OAC) can read
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Statement:
+          - Sid: CloudFrontReadOnly        # only THIS distribution, signed with OAC
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${WebBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt WebBucket.Arn, !Sub "${WebBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  WebOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-web"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Security headers on every response. The CSP mirrors web/index.html, plus frame-ancestors
+  # (anti-clickjacking), which only works as a real header. Host wildcards (not exact refs)
+  # avoid a CloudFormation cycle: the API's CORS already references this distribution.
+  WebSecurityHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${AWS::StackName}-web-security"
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: !Join ["; ", [
+              "default-src 'self'",
+              "script-src 'self' https://cdn.jsdelivr.net",
+              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+              "font-src https://fonts.gstatic.com",
+              "img-src 'self' data:",
+              !Sub "connect-src 'self' https://*.execute-api.${AWS::Region}.amazonaws.com https://*.auth.${AWS::Region}.amazoncognito.com",
+              "base-uri 'self'",
+              "form-action 'self'",
+              "frame-ancestors 'none'"]]
+          StrictTransportSecurity: { Override: true, AccessControlMaxAgeSec: 31536000, IncludeSubdomains: true }
+          ContentTypeOptions: { Override: true }
+          FrameOptions: { Override: true, FrameOption: DENY }
+          ReferrerPolicy: { Override: true, ReferrerPolicy: no-referrer }
+
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "${AWS::StackName} dashboard"
+        Enabled: true
+        DefaultRootObject: index.html       # routes live in the #hash → no SPA rewrite needed
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200          # includes Asia (Singapore, Vietnam edges); cheaper than All
+        Origins:
+          - Id: web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOriginAccessControl.Id
+            S3OriginConfig: { OriginAccessIdentity: "" }   # empty = use OAC, not the legacy OAI
+        DefaultCacheBehavior:
+          TargetOriginId: web
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6          # AWS managed "CachingOptimized"
+          ResponseHeadersPolicyId: !Ref WebSecurityHeaders
+
   # ---------------- Alerting ----------------
   AlertTopic:
     Type: AWS::SNS::Topic
@@ -441,7 +541,15 @@ Outputs:
     Value: !Ref UserPoolClient
   LoginUrl:
     Description: Cognito-hosted login page (the website redirects here)
-    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&scope=openid+email+profile&redirect_uri=${DashboardUrl}"
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&scope=openid+email+profile&redirect_uri=https://${WebDistribution.DomainName}/"
+  WebUrl:
+    Description: The dashboard website
+    Value: !Sub "https://${WebDistribution.DomainName}/"
+  WebBucketName:
+    Description: Website files (deploy with tools/deploy-web.ps1)
+    Value: !Ref WebBucket
+  WebDistributionId:
+    Value: !Ref WebDistribution
   AthenaWorkGroupName:
     Value: !Ref AthenaWorkGroup
   LakeDatabaseName:
