@@ -43,6 +43,7 @@ public sealed class Function
         var failures = new List<SQSBatchResponse.BatchItemFailure>();
         var lakeLines = new List<string>();
         var lateByCarrier = new Dictionary<string, int>();
+        var deliveredByCarrier = new Dictionary<string, int>();
         var failedOnce = false;
 
         foreach (var message in sqsEvent.Records)
@@ -70,6 +71,8 @@ public sealed class Function
 
                 if (result.NewlyLate)
                     lateByCarrier[evt.Carrier] = lateByCarrier.GetValueOrDefault(evt.Carrier) + 1;
+                if (result.NewlyDelivered)
+                    deliveredByCarrier[evt.Carrier] = deliveredByCarrier.GetValueOrDefault(evt.Carrier) + 1;
             }
             catch (Exception ex)
             {
@@ -81,7 +84,7 @@ public sealed class Function
 
         // Best effort: DynamoDB is the source of truth; analytics/metrics must not block processing.
         await TryWriteLakeAsync(lakeLines, context);
-        await TryPublishLateMetricAsync(lateByCarrier, context);
+        await TryPublishSlaMetricsAsync(deliveredByCarrier, lateByCarrier, context);
 
         // Only failed messages go back to the queue (after 5 tries → DLQ).
         return new SQSBatchResponse { BatchItemFailures = failures };
@@ -131,18 +134,25 @@ public sealed class Function
         }
     }
 
-    private async Task TryPublishLateMetricAsync(Dictionary<string, int> lateByCarrier, ILambdaContext context)
+    /// <summary>
+    /// "Deliveries" (with a promise) and "LateDeliveries". The alarm divides them: late RATE, not a raw
+    /// count, so it does not fire more often just because more orders flow through.
+    /// </summary>
+    private async Task TryPublishSlaMetricsAsync(
+        Dictionary<string, int> deliveredByCarrier, Dictionary<string, int> lateByCarrier, ILambdaContext context)
     {
-        if (lateByCarrier.Count == 0) return;
+        if (deliveredByCarrier.Count == 0 && lateByCarrier.Count == 0) return;
 
         var data = new List<MetricDatum>();
-        foreach (var (carrier, count) in lateByCarrier)
+        foreach (var (metric, byCarrier) in new[] { ("Deliveries", deliveredByCarrier), ("LateDeliveries", lateByCarrier) })
         {
+            if (byCarrier.Count == 0) continue;
             // Two dimension sets: per service (used by the alarm) and per carrier (for comparison).
-            data.Add(Datum(count, new Dimension { Name = "Service", Value = ServiceName }));
-            data.Add(Datum(count,
-                new Dimension { Name = "Service", Value = ServiceName },
-                new Dimension { Name = "Carrier", Value = carrier }));
+            data.Add(Datum(metric, byCarrier.Values.Sum(), new Dimension { Name = "Service", Value = ServiceName }));
+            foreach (var (carrier, count) in byCarrier)
+                data.Add(Datum(metric, count,
+                    new Dimension { Name = "Service", Value = ServiceName },
+                    new Dimension { Name = "Carrier", Value = carrier }));
         }
 
         try
@@ -155,9 +165,9 @@ public sealed class Function
         }
     }
 
-    private static MetricDatum Datum(int value, params Dimension[] dims) => new()
+    private static MetricDatum Datum(string metricName, int value, params Dimension[] dims) => new()
     {
-        MetricName = "LateDeliveries",
+        MetricName = metricName,
         Unit = StandardUnit.Count,
         Value = value,
         TimestampUtc = DateTime.UtcNow,

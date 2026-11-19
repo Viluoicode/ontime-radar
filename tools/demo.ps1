@@ -2,7 +2,7 @@
 # Mỗi cảnh ứng với 1 "nỗi đau" trong docs/product.md.
 #
 #   .\tools\demo.ps1 -Email quanly@example.com              # cả 5 cảnh (cảnh 4 gửi email cảnh báo thật)
-#   .\tools\demo.ps1 -Email quanly@example.com -SkipAlarm   # bỏ cảnh 4
+#   .\tools\demo.ps1 -Email quanly@example.com -SkipAlarm   # bỏ cảnh 4 (cảnh 4 mất tới ~20 phút)
 #   .\tools\demo.ps1 -Email quanly@example.com -NoPause     # chạy liền một mạch, không chờ Enter
 #   .\tools\demo.ps1 -Token $token                          # dùng token có sẵn (get-token.ps1)
 #
@@ -148,14 +148,34 @@ Pause-Demo
 if (-not $SkipAlarm) {
     Title "CẢNH 4 · Biết đơn giao trễ TRƯỚC khi khách phàn nàn"
     Note "Vấn đề: shop thường chỉ biết giao trễ khi khách gọi điện, đánh giá 1 sao."
-    Note "Mô phỏng 1 giờ J&T giao trễ hàng loạt: 5 đơn giao sau ngày hẹn..."
-    foreach ($n in 1..5) {
-        $tc = "DEMO$($run)L$n"
-        Send "jt" @{ billCode = $tc; scanType = "PICKUP"; scanTime = (Epoch $today.AddDays(-5).AddHours(8)); expectedDate = (Day $today.AddDays(-3)); receiverProvince = "HCM" }
-        Send "jt" @{ billCode = $tc; scanType = "SIGNED"; scanTime = (Epoch ([DateTime]::UtcNow.AddMinutes(-$n))); receiverProvince = "HCM" }
-    }
-    Note "Đã gửi. Ngưỡng cảnh báo: ≥ 5 đơn trễ / giờ. Đang chờ CloudWatch đánh giá (thường 1–5 phút)..."
     $alarm = aws cloudwatch describe-alarms --alarm-name-prefix "$StackName-LateDeliveryAlarm" --query "MetricAlarms[0].AlarmName" --output text
+    $threshold = aws cloudwatch describe-alarms --alarm-names $alarm --query "MetricAlarms[0].Threshold" --output text
+    Note "Quy tắc cảnh báo: tỉ lệ trễ ≥ $threshold % trong 2 trên 3 khung 15 phút liên tiếp"
+    Note "(một khung xấu lẻ loi không báo – tránh email giả). Mô phỏng J&T giao trễ hàng loạt KÉO DÀI:"
+    Note "gửi 2 đợt đơn trễ ở 2 khung 15 phút liên tiếp. Có thể phải chờ tới 15 phút giữa 2 đợt."
+
+    function Send-LateBurst($tag, $count = 15) {
+        foreach ($n in 1..$count) {
+            $tc = "DEMO$($run)$tag$n"
+            Send "jt" @{ billCode = $tc; scanType = "PICKUP"; scanTime = (Epoch $today.AddDays(-5).AddHours(8)); expectedDate = (Day $today.AddDays(-3)); receiverProvince = "HCM" }
+            Send "jt" @{ billCode = $tc; scanType = "SIGNED"; scanTime = (Epoch ([DateTime]::UtcNow.AddMinutes(-$n))); receiverProvince = "HCM" }
+        }
+    }
+    Send-LateBurst "A"
+    Good ("{0:HH:mm} – đợt 1: 15 đơn J&T giao trễ" -f (Get-Date))
+
+    # CloudWatch windows are aligned to the clock: :00, :15, :30, :45 (UTC). Wait for the next one.
+    $nowUtc = [DateTime]::UtcNow
+    $nextWindow = $nowUtc.Date.AddMinutes([math]::Floor($nowUtc.TimeOfDay.TotalMinutes / 15) * 15 + 15).AddSeconds(15)
+    while ([DateTime]::UtcNow -lt $nextWindow) {
+        $left = $nextWindow - [DateTime]::UtcNow
+        Write-Host ("`r  Chờ sang khung 15 phút kế tiếp: còn {0:mm\:ss}   " -f $left) -NoNewline
+        Start-Sleep 5
+    }
+    Write-Host ""
+    Send-LateBurst "B"
+    Good ("{0:HH:mm} – đợt 2: 15 đơn J&T giao trễ (khung thứ 2 liên tiếp)" -f (Get-Date))
+    Note "Đang chờ CloudWatch nhận số liệu và đánh giá (thường 1–5 phút)..."
     $state = "OK"; $deadline = (Get-Date).AddMinutes(8)
     while ((Get-Date) -lt $deadline) {
         $state = aws cloudwatch describe-alarms --alarm-names $alarm --query "MetricAlarms[0].StateValue" --output text
@@ -165,8 +185,9 @@ if (-not $SkipAlarm) {
     }
     Write-Host ""
     if ($state -eq "ALARM") {
-        Good "Cảnh báo đã bật → email 'ALARM: LateDeliveryAlarm' đang được gửi tới hộp thư của bạn."
+        Good "Cảnh báo đã bật → email 'ALARM: LateDeliveryAlarm' (có link trang Cần xử lý) đang tới hộp thư."
         Good "Người vận hành biết ngay hãng nào đang trễ, chủ động báo khách / đổi hãng."
+        Good "Khi tỉ lệ trễ trở lại bình thường (~30–45 phút sau), sẽ có thêm email 'OK' báo đã hết sự cố."
     } else {
         Note "Cảnh báo chưa bật sau 8 phút. Kiểm tra lại trong CloudWatch → Alarms sau ít phút."
     }

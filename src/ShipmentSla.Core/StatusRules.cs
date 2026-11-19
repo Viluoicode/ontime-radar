@@ -84,4 +84,18 @@ public static class SlaRules
         estimatedDelivery is null
             ? null
             : DateOnly.FromDateTime(deliveredAt.UtcDateTime) > estimatedDelivery.Value;
+
+    /// <summary>
+    /// What one processed event adds to the SLA metrics (late-delivery RATE alarm = late / delivered).
+    /// NewlyDelivered: the shipment just became Delivered AND has a promise (otherwise it cannot be
+    /// on time or late, so it must not dilute the rate). NewlyLate: it just became late.
+    /// A duplicate or rejected event leaves the state unchanged → both false.
+    /// </summary>
+    public static (bool NewlyDelivered, bool NewlyLate) MetricDelta(ShipmentState? before, ShipmentState? after)
+    {
+        var newlyDelivered = after is { Status: ShipmentStatus.Delivered, IsLate: not null }
+                             && before?.Status != ShipmentStatus.Delivered;
+        var newlyLate = after?.IsLate == true && before?.IsLate != true;
+        return (newlyDelivered, newlyLate);
+    }
 }

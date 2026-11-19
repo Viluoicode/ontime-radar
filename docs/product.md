@@ -30,7 +30,8 @@ kèm **dashboard web** để nhân viên dùng hằng ngày.
 2. **Timeline 1 chỗ** – `GET /shipments/{id}` trả trạng thái hiện tại + toàn bộ lịch sử.
 3. **Chống sai lệch** – loại sự kiện trùng (idempotent), bỏ qua sự kiện cũ đến muộn,
    chặn chuyển trạng thái vô lý (DELIVERED → IN_TRANSIT).
-4. **Cảnh báo giao trễ gần realtime** – đơn giao sau ngày cam kết → metric CloudWatch → email.
+4. **Cảnh báo giao trễ** – tỉ lệ đơn giao sau ngày cam kết vượt ngưỡng trong 2/3 khung 15 phút
+   → CloudWatch alarm → email (kèm link trang *Cần xử lý*), và email khi đã trở lại bình thường.
 5. **Phân tích SLA** – lưu toàn bộ sự kiện vào S3, truy vấn Athena: tỉ lệ đúng hạn
    theo hãng, theo tỉnh/bang, theo tuần, thời gian vận chuyển trung bình.
 6. **Dashboard web** – 3 trang: *Tổng quan SLA*, *Tra cứu đơn* (dòng thời gian), *Cần xử lý*
@@ -120,7 +121,7 @@ CREATED → CANCELLED
 | --- | --- | --- |
 | Hãng vận chuyển, mã vận đơn, mốc *Đang vận chuyển / Đang giao / Giao thất bại* là **giả lập** | Tỉ lệ giao thất bại không phản ánh hãng thật | Kết nối API/webhook thật của hãng |
 | Replayer phát dữ liệu theo **ngày đặt hàng** | Các tuần giao gần nhất chỉ có đơn giao chậm → tỉ lệ trễ bị đẩy lên (dashboard có ghi chú) | Tự ổn định khi phát thêm; hoặc chỉ tính tuần đã "đủ dữ liệu" |
-| Cảnh báo trễ dùng **ngưỡng số đơn / giờ** (5) | Khi lượng đơn tăng, alarm bật/tắt nhiều lần trong ngày (alert fatigue) | Đổi sang **tỉ lệ** trễ (%) hoặc nâng ngưỡng |
+| ~~Cảnh báo trễ dùng ngưỡng số đơn / giờ (5)~~ – **đã xử lý 19/11/2026** | Trước đó alarm bật/tắt 3 lần/ngày khi lượng đơn tăng (alert fatigue) | Đã đổi sang **tỉ lệ trễ ≥ 20 % trong 2/3 khung 15 phút** (≥ 10 đơn/khung), kèm email "đã hết sự cố". Đánh đổi: báo chậm hơn (~30–45 phút) |
 | Báo cáo dùng Athena | Mỗi lần tải mất ~1–2 giây | Đủ cho báo cáo; cần nhanh hơn thì tổng hợp sẵn (bảng tổng hợp theo ngày) |
 | Tài khoản AWS mới chỉ chạy **10 Lambda cùng lúc** | Đã giới hạn Processor 2 luồng để API không bị 503 | Xin nâng quota lên 1.000 |
 | Dữ liệu Olist là **Brazil** (bang SP, RJ…) | Khu vực không phải tỉnh Việt Nam | Thay bằng dữ liệu đơn hàng Việt Nam khi có |

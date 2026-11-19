@@ -68,7 +68,8 @@ sam deploy --guided
 #   AlertEmail         : email nhận cảnh báo
 #   ReplayState        : DISABLED   (bật sau khi test xong)
 #   OrdersPerRun       : 20
-#   LateAlarmThreshold : 5
+#   LateRatePercent    : 20   (cảnh báo khi tỉ lệ trễ ≥ 20 % trong 2/3 khung 15 phút)
+#   MinDeliveries      : 10   (khung 15 phút chỉ tính khi có ≥ 10 đơn đã giao)
 #   Save arguments to configuration file: Y
 ```
 
@@ -277,6 +278,7 @@ Hoặc xem tay:
 | **Athena + partition projection** | Phân tích SLA trên S3, không cần crawler; lọc theo `dt` để chỉ quét phần dữ liệu cần; workgroup chặn ở 1 GB/query |
 | **Whitelist `groupBy`, `days` là số nguyên** | Không đưa chuỗi người dùng nhập vào SQL (chống SQL injection) |
 | **Cognito + JWT authorizer của API Gateway** | Token sai/hết hạn bị chặn ở cổng (401) trước khi tốn tiền chạy Lambda; không tự viết code kiểm tra chữ ký |
+| **Cảnh báo theo TỈ LỆ trễ, 2/3 khung 15 phút** | Ngưỡng "số đơn trễ / giờ" bật tắt liên tục khi lượng đơn tăng (alert fatigue); tỉ lệ + yêu cầu kéo dài → ít email giả, có email "đã hết sự cố" |
 | **CloudFront + S3 riêng khoá kín (OAC)** | Website chạy HTTPS toàn cầu gần như 0 USD; không ai đọc thẳng được bucket, bucket web tách khỏi dữ liệu đơn hàng |
 | **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
 

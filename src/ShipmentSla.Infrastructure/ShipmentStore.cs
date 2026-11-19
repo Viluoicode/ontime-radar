@@ -16,8 +16,11 @@ public sealed record TimelineEntry(
 
 public sealed record ShipmentTimeline(ShipmentState State, IReadOnlyList<TimelineEntry> Events);
 
-/// <summary>Result of processing one event; NewlyLate drives the CloudWatch "late delivery" metric.</summary>
-public sealed record ProcessResult(Decision Decision, ShipmentState? State, bool NewlyLate);
+/// <summary>
+/// Result of processing one event. NewlyDelivered / NewlyLate drive the CloudWatch metrics
+/// "Deliveries" and "LateDeliveries" (the alarm watches late / delivered).
+/// </summary>
+public sealed record ProcessResult(Decision Decision, ShipmentState? State, bool NewlyLate, bool NewlyDelivered = false);
 
 public sealed class ShipmentStore(IAmazonDynamoDB ddb, string tableName)
 {
@@ -117,8 +120,8 @@ public sealed class ShipmentStore(IAmazonDynamoDB ddb, string tableName)
         }
         // Any other failure (e.g. version conflict) bubbles up → SQS redelivers the message → retried.
 
-        var newlyLate = newState?.IsLate == true && current?.IsLate != true;
-        return new ProcessResult(decision, newState ?? current, newlyLate);
+        var (newlyDelivered, newlyLate) = SlaRules.MetricDelta(current, newState ?? current);
+        return new ProcessResult(decision, newState ?? current, newlyLate, newlyDelivered);
     }
 
     // ---------- replayer cursor ----------

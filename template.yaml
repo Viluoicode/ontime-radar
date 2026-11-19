@@ -28,10 +28,17 @@ Parameters:
     MinValue: 1
     MaxValue: 200
     Description: Olist orders replayed per scheduler run.
-  LateAlarmThreshold:
+  LateRatePercent:
     Type: Number
-    Default: 5
-    Description: Alarm when at least this many late deliveries happen within one hour.
+    Default: 20
+    MinValue: 1
+    MaxValue: 100
+    Description: Alarm when the late-delivery RATE (%) reaches this in 2 of 3 consecutive 15-minute windows.
+  MinDeliveries:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: A 15-minute window counts only with at least this many deliveries (1 late of 2 is not "50 % late").
   LocalDevOrigin:
     Type: String
     Default: "http://localhost:5500"
@@ -491,20 +498,40 @@ Resources:
       Protocol: email
       Endpoint: !Ref AlertEmail
 
+  # Late-delivery RATE (not a raw count): rate = 100 × late / delivered per 15-minute window
+  # (= one replayer run). Fires when 2 of the last 3 windows are at or above LateRatePercent,
+  # so one unlucky window does not wake anyone up. Emails on ALARM and again when back to OK.
   LateDeliveryAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: Too many shipments delivered after the promised date in the last hour.
-      Namespace: ShipmentSla
-      MetricName: LateDeliveries
-      Dimensions: [{ Name: Service, Value: shipment-sla }]
-      Statistic: Sum
-      Period: 3600
-      EvaluationPeriods: 1
-      Threshold: !Ref LateAlarmThreshold
+      AlarmDescription: !Sub |
+        Tỉ lệ giao trễ ≥ ${LateRatePercent}% trong 2/3 khung 15 phút gần nhất (chỉ tính khung có ≥ ${MinDeliveries} đơn đã giao).
+        Việc cần làm: mở trang "Cần xử lý" để xem đơn trễ theo hãng và bang, báo CSKH liên hệ khách, kiểm tra hãng vận chuyển đang chậm.
+        Dashboard: https://${WebDistribution.DomainName}/#/attention
+      Metrics:
+        - Id: late
+          ReturnData: false
+          MetricStat:
+            Metric: { Namespace: ShipmentSla, MetricName: LateDeliveries, Dimensions: [{ Name: Service, Value: shipment-sla }] }
+            Period: 900
+            Stat: Sum
+        - Id: delivered
+          ReturnData: false
+          MetricStat:
+            Metric: { Namespace: ShipmentSla, MetricName: Deliveries, Dimensions: [{ Name: Service, Value: shipment-sla }] }
+            Period: 900
+            Stat: Sum
+        - Id: rate
+          Label: Late delivery rate (%)
+          ReturnData: true
+          Expression: !Sub "IF(delivered >= ${MinDeliveries}, 100 * FILL(late, 0) / delivered, 0)"
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref LateRatePercent
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]          # "back to normal" email
 
   DlqAlarm:
     Type: AWS::CloudWatch::Alarm

@@ -110,7 +110,7 @@ Try-Check "7. Alarm CloudWatch" {
     $al = aws cloudwatch describe-alarms --alarm-name-prefix $StackName --query "MetricAlarms[].[AlarmName,StateValue]" --output json | ConvertFrom-Json
     $inAlarm = @($al | Where-Object { $_[1] -eq "ALARM" })
     $detail = ($al | ForEach-Object { "$(($_[0] -split '-')[2]): $($_[1])" }) -join " · "
-    Add-Result "7. Alarm CloudWatch" $(if ($inAlarm.Count -eq 0) { "ĐẠT" } else { "CẢNH BÁO" }) $detail "LateDeliveryAlarm = ALARM: ≥ ngưỡng đơn trễ trong 1 giờ (thật, hoặc do demo cảnh 4). Tự về OK khi giờ sau dưới ngưỡng."
+    Add-Result "7. Alarm CloudWatch" $(if ($inAlarm.Count -eq 0) { "ĐẠT" } else { "CẢNH BÁO" }) $detail "LateDeliveryAlarm = ALARM: tỉ lệ trễ ≥ ngưỡng trong 2/3 khung 15 phút (thật, hoặc do demo cảnh 4). Xem trang Cần xử lý; tự về OK khi tỉ lệ giảm."
 }
 
 # ---------------- 8. API ----------------
