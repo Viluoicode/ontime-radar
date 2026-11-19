@@ -7,6 +7,7 @@
 #   .\tools\demo.ps1 -Token $token                          # dùng token có sẵn (get-token.ps1)
 #
 # -Email: tài khoản nhóm "manager" (cảnh 5 cần quyền xem báo cáo SLA). Mật khẩu được hỏi ẩn.
+#         Chạy bằng tài khoản CSKH cũng được: cảnh 1–4 chạy bình thường, cảnh 5 cho thấy API trả 403.
 # Đơn demo có mã bắt đầu bằng DEMO → không tính vào báo cáo SLA (/sla/summary).
 param(
     [string]$Email,                  # tài khoản Quản lý (nhóm manager)
@@ -33,6 +34,18 @@ if (-not $Token) {
     $Token = & "$PSScriptRoot\get-token.ps1" -Email $Email -StackName $StackName
 }
 $auth = @{ Authorization = "Bearer $Token" }            # nhân viên đọc dữ liệu (Cognito)
+
+# Read the Cognito groups from the token payload (display only – the API does the real check).
+function Get-TokenGroups($jwt) {
+    try {
+        $p = $jwt.Split(".")[1].Replace("-", "+").Replace("_", "/")
+        switch ($p.Length % 4) { 2 { $p += "==" } 3 { $p += "=" } }
+        $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+        return @($claims."cognito:groups" | Where-Object { $_ })
+    } catch { return @() }
+}
+$groups = Get-TokenGroups $Token
+$groupText = if ($groups.Count) { $groups -join ", " } else { "không rõ" }
 $run = Get-Date -Format "MMddHHmmss"           # mã riêng cho mỗi lần chạy → chạy lại bao nhiêu lần cũng được
 $today = [DateTime]::UtcNow.Date
 
@@ -55,6 +68,10 @@ function Lookup($carrier, $code) {
 
 Write-Host ""
 Write-Host "  SHIPMENT SLA SERVICE – DEMO   (API: $api, lượt chạy $run)" -ForegroundColor White
+Note "Đăng nhập với nhóm: $groupText"
+if ($groups.Count -and $groups -notcontains "manager") {
+    Write-Host "  Lưu ý: tài khoản không thuộc nhóm Quản lý → cảnh 5 (báo cáo SLA) sẽ bị API từ chối (403), đúng thiết kế." -ForegroundColor Yellow
+}
 
 # =====================================================================================
 Title "CẢNH 1 · Mỗi hãng một kiểu dữ liệu → hệ thống hiểu chung một ngôn ngữ"
@@ -199,18 +216,28 @@ Title "CẢNH 5 · Chọn hãng bằng số liệu, không theo cảm tính"
 Note "Vấn đề: không biết hãng nào / khu vực nào hay giao trễ để đàm phán hoặc chuyển hãng."
 Note "Truy vấn Athena trên toàn bộ sự kiện thật (đã loại đơn demo)..."
 
-$byCarrier = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=carrier" -Headers $auth
-$byCarrier.rows | ForEach-Object {
-    [pscustomobject]@{ "Hãng" = $_.group.ToUpper(); "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent); "Đúng hạn" = ("{0:N1}%" -f (100 - $_.latePercent)) }
-} | Format-Table -AutoSize | Out-String | Write-Host
+$byCarrier = $null
+try { $byCarrier = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=carrier" -Headers $auth }
+catch { if ([int]$_.Exception.Response.StatusCode -ne 403) { throw } }
 
-$byRegion = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=region" -Headers $auth
-Note "Khu vực có tỉ lệ trễ cao nhất (có ít nhất 3 đơn đã giao):"
-$byRegion.rows | Where-Object { $_.delivered -ge 3 } | Select-Object -First 5 | ForEach-Object {
-    [pscustomobject]@{ "Bang" = $_.group; "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent) }
-} | Format-Table -AutoSize | Out-String | Write-Host
+if (-not $byCarrier) {
+    Write-Host "  ✖ 403 Forbidden: tài khoản nhóm [$groupText] không có quyền xem báo cáo SLA." -ForegroundColor Yellow
+    Good "Đúng thiết kế: CSKH chỉ tra cứu đơn, báo cáo SLA dành cho Quản lý."
+    Good "API tự chặn (không chỉ ẩn menu trên web) → gọi thẳng API bằng token CSKH cũng không xem được."
+    Note "Muốn xem cảnh này: .\tools\demo.ps1 -Email <email-quản-lý> -SkipAlarm"
+} else {
+    $byCarrier.rows | ForEach-Object {
+        [pscustomobject]@{ "Hãng" = $_.group.ToUpper(); "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent); "Đúng hạn" = ("{0:N1}%" -f (100 - $_.latePercent)) }
+    } | Format-Table -AutoSize | Out-String | Write-Host
 
-$total = ($byCarrier.rows | Measure-Object delivered -Sum).Sum
-Good "Số liệu từ $total đơn thật đã giao. Dữ liệu tăng ~1.900 đơn/ngày nhờ Replayer chạy mỗi 15 phút."
-Good "Mỗi truy vấn tốn chưa tới 0,001 USD – cả hệ thống chạy khoảng vài USD/tháng."
+    $byRegion = Invoke-RestMethod "$api/sla/summary?days=30&groupBy=region" -Headers $auth
+    Note "Khu vực có tỉ lệ trễ cao nhất (có ít nhất 3 đơn đã giao):"
+    $byRegion.rows | Where-Object { $_.delivered -ge 3 } | Select-Object -First 5 | ForEach-Object {
+        [pscustomobject]@{ "Bang" = $_.group; "Đã giao" = $_.delivered; "Trễ" = $_.late; "Tỉ lệ trễ" = ("{0:N1}%" -f $_.latePercent) }
+    } | Format-Table -AutoSize | Out-String | Write-Host
+
+    $total = ($byCarrier.rows | Measure-Object delivered -Sum).Sum
+    Good "Số liệu từ $total đơn thật đã giao. Dữ liệu tăng ~1.900 đơn/ngày nhờ Replayer chạy mỗi 15 phút."
+    Good "Mỗi truy vấn tốn chưa tới 0,001 USD – cả hệ thống chạy khoảng vài USD/tháng."
+}
 Write-Host ""
