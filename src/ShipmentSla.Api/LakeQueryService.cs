@@ -14,7 +14,7 @@ public sealed record TrendRow(string Day, long Delivered, long Late, double Late
 
 public sealed record ShipmentRow(
     string Carrier, string TrackingCode, string? OrderId, string? Region, string? Status,
-    bool? IsLate, string? EstimatedDelivery, string? LastEventAt, string? UpdatedAt);
+    bool? IsLate, string? EstimatedDelivery, string? LastEventAt, string? UpdatedAt, long FailedAttempts);
 
 public sealed class LakeQueryService(IAmazonAthena athena, string database, string workGroup)
 {
@@ -35,7 +35,7 @@ public sealed class LakeQueryService(IAmazonAthena athena, string database, stri
     public async Task<List<ShipmentRow>> ShipmentsAsync(ShipmentQuery q, CancellationToken ct) =>
         (await RunAsync(LakeQueries.Shipments(q, Today), ct))
         .Select(c => new ShipmentRow(c[0]!, c[1]!, Text(c[2]), Text(c[3]), Text(c[4]),
-            Bool(c[5]), Text(c[6]), Text(c[7]), Text(c[8])))
+            Bool(c[5]), Text(c[6]), Text(c[7]), Text(c[8]), Long(c[9])))
         .ToList();
 
     /// <summary>Start the query, wait for it, return all data rows (header row removed).</summary>

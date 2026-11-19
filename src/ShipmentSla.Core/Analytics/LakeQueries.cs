@@ -17,7 +17,8 @@ public sealed record ShipmentQuery(
     string? Carrier = null,
     string? Region = null,
     bool Late = false,       // delivered after the promised date
-    bool Overdue = false);   // still open, but the latest event is already past the promised date
+    bool Overdue = false,    // still open, but the latest event is already past the promised date
+    bool HadFailedAttempt = false); // at least one failed delivery attempt in its history
 
 public static partial class LakeQueries
 {
@@ -106,7 +107,8 @@ public static partial class LakeQueries
 
     /// <summary>
     /// Current state of each shipment = its most recently processed lake row.
-    /// Columns: carrier, trackingcode, orderid, region, status, islate, promised, last_event_at, updated_at.
+    /// Columns: carrier, trackingcode, orderid, region, status, islate, promised, last_event_at, updated_at,
+    /// failed_attempts.
     /// </summary>
     public static string Shipments(ShipmentQuery q, DateOnly today)
     {
@@ -118,6 +120,7 @@ public static partial class LakeQueries
         if (q.Overdue)
             where.Add("currentstatus NOT IN ('Delivered', 'Returned', 'Cancelled') " +
                       "AND promised IS NOT NULL AND date(last_event_at) > CAST(promised AS date)");
+        if (q.HadFailedAttempt) where.Add("failed_attempts > 0");
 
         return $"""
             WITH ranked AS (
@@ -125,12 +128,13 @@ public static partial class LakeQueries
                        max(estimateddelivery) OVER (PARTITION BY shipmentid) AS promised,
                        max(CASE WHEN outcome = 'Applied' THEN from_iso8601_timestamp(occurredat) END)
                            OVER (PARTITION BY shipmentid) AS last_event_at,
+                       count_if(status = 'FailedAttempt') OVER (PARTITION BY shipmentid) AS failed_attempts,
                        row_number() OVER (PARTITION BY shipmentid ORDER BY processedat DESC) AS rn
                 FROM events
                 WHERE dt >= '{From(q.Days, today)}' AND {ExcludeTestData}
             )
             SELECT carrier, trackingcode, orderid, region, currentstatus, islate, promised,
-                   to_iso8601(last_event_at) AS last_event_at, processedat
+                   to_iso8601(last_event_at) AS last_event_at, processedat, failed_attempts
             FROM ranked
             WHERE {string.Join(" AND ", where)}
             ORDER BY processedat DESC

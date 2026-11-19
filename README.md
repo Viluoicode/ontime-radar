@@ -216,6 +216,27 @@ GROUP BY carrier;
 
 Đơn demo có mã bắt đầu bằng `DEMO` và **không tính vào** `/sla/summary`.
 
+## 5d. Website dashboard (`web/`)
+
+HTML/CSS/JS thuần (không build, ~90 KB) + Chart.js từ CDN. Thiết kế theo skill *ui-ux-pro-max*
+(Swiss / tối giản, dày thông tin), font Fira Sans + JetBrains Mono (có dấu tiếng Việt), sáng/tối theo máy.
+
+| Trang | Ai thấy | Dữ liệu |
+| --- | --- | --- |
+| Tổng quan SLA | Quản lý | KPI, tỉ lệ trễ theo tuần, theo hãng, bang trễ nhiều nhất |
+| Tra cứu đơn | CSKH + Quản lý | Trạng thái + dòng thời gian của 1 vận đơn (link `#/lookup/<hãng>/<mã>`) |
+| Cần xử lý | CSKH + Quản lý | Đơn giao trễ / từng giao thất bại / quá hạn chưa giao, lọc theo hãng, bang |
+
+Chạy thử ở máy (đăng nhập qua trang Cognito, quay về `http://localhost:5500/`):
+
+```powershell
+.\tools\make-web-config.ps1                                   # sinh web/js/config.js từ Outputs của stack
+py -m http.server 5500 --bind 127.0.0.1 --directory web       # mở http://localhost:5500 (dùng "localhost", không phải 127.0.0.1)
+```
+
+Bảo mật: đăng nhập OAuth code + PKCE (không có secret trong trình duyệt), token chỉ nằm trong tab
+(sessionStorage), Content-Security-Policy, Chart.js có SRI, mọi dữ liệu từ API đều được escape.
+
 ## 6. Kiểm tra hằng ngày (5 phút)
 
 - CloudWatch → Lambda `ReplayerFunction`: có chạy mỗi 15 phút, `Failed = 0`.
@@ -256,7 +277,8 @@ sam delete --stack-name shipment-sla
 - [x] Tuần 2: Glue Data Catalog + Athena (`GET /sla/summary`), GitHub Actions CI
 - [x] API cho dashboard: `GET /shipments` (danh sách), `GET /sla/trend`, CORS
 - [x] Cognito: đăng nhập, 2 vai trò CSKH / Quản lý, MFA tuỳ chọn
-- [ ] Website dashboard (S3 + CloudFront)
+- [x] Website dashboard chạy ở máy (3 trang, đăng nhập Cognito, sáng/tối)
+- [ ] Đưa website lên S3 + CloudFront
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo

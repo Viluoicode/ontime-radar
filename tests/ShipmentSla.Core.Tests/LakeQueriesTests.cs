@@ -122,6 +122,15 @@ public class LakeQueriesTests
     }
 
     [Fact]
+    public void Failed_attempt_filter_is_applied_only_when_asked()
+    {
+        Assert.Contains("failed_attempts > 0", LakeQueries.Shipments(new ShipmentQuery(HadFailedAttempt: true), Today));
+        var plain = LakeQueries.Shipments(new ShipmentQuery(), Today);
+        Assert.DoesNotContain("failed_attempts > 0", plain);
+        Assert.Contains("count_if(status = 'FailedAttempt')", plain);   // still returned as a column
+    }
+
+    [Fact]
     public void Trend_filters_by_carrier_only_when_given()
     {
         Assert.Contains("carrier = 'jt'", LakeQueries.SlaTrend(30, "JT", Today));

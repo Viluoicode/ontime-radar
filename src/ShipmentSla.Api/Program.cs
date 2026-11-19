@@ -2,7 +2,7 @@
 // On AWS it runs inside Lambda behind API Gateway (HTTP API); locally `dotnet run` uses Kestrel.
 //   POST /carriers/{carrier}/webhook        carrier pushes a status → normalize → SQS FIFO
 //   GET  /shipments/{carrier}/{tracking}    current state + full timeline (DynamoDB)
-//   GET  /shipments?status=&carrier=&region=&late=&overdue=&days=&limit=   list for the dashboard (Athena)
+//   GET  /shipments?status=&carrier=&region=&late=&overdue=&hadFailedAttempt=&days=&limit=   list (Athena)
 //   GET  /sla/summary?days=30&groupBy=carrier|region   late-delivery rate from the event lake (Athena)
 //   GET  /sla/trend?days=30&carrier=                   per delivery day: volume, late %, avg delivery days
 //   GET  /health
@@ -104,7 +104,7 @@ app.MapGet("/shipments/{carrier}/{trackingCode}", async (
 app.MapGet("/shipments", async (
     LakeQueryService lake, ILogger<Program> log, CancellationToken ct,
     int days = 30, int limit = 50, string? status = null, string? carrier = null, string? region = null,
-    bool late = false, bool overdue = false) =>
+    bool late = false, bool overdue = false, bool hadFailedAttempt = false) =>
 {
     ShipmentStatus? parsedStatus = null;
     if (status is not null)
@@ -113,7 +113,7 @@ app.MapGet("/shipments", async (
             return Results.BadRequest(new { error = $"status must be one of: {string.Join(", ", Enum.GetNames<ShipmentStatus>())}" });
         parsedStatus = s;
     }
-    var query = new ShipmentQuery(days, limit, parsedStatus, carrier, region, late, overdue);
+    var query = new ShipmentQuery(days, limit, parsedStatus, carrier, region, late, overdue, hadFailedAttempt);
     if (LakeQueries.Validate(query) is { } error) return Results.BadRequest(new { error });
 
     return await Lake(log, "shipment list", async () => new { query, rows = await lake.ShipmentsAsync(query, ct) });
