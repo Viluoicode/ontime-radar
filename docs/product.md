@@ -39,6 +39,10 @@ kèm **dashboard web** để nhân viên dùng hằng ngày.
 7. **Đăng nhập & phân quyền** – Cognito, tài khoản do quản trị viên cấp, MFA tuỳ chọn;
    vai trò **CSKH** chỉ tra cứu đơn, **Quản lý** xem thêm báo cáo SLA.
 
+![Dashboard – trang Tổng quan SLA](screenshots/overview.jpg)
+
+*Trang Tổng quan SLA (19/11/2026). Thêm ảnh: [README – Ảnh giao diện](../README.md#ảnh-giao-diện).*
+
 **Câu pitch:** *Backend + dashboard theo dõi vận đơn đa hãng: chuẩn hóa trạng thái, phát hiện đơn trễ
 gần realtime và đo tỉ lệ giao đúng hạn theo hãng & khu vực – serverless, có đăng nhập phân quyền,
 chi phí vài USD/tháng.*

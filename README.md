@@ -23,6 +23,18 @@ Ops / CSKH ── GET /shipments/{carrier}/{tracking} ──> Lambda API → Dyn
 Quản lý   ── GET /sla/summary?days=30&groupBy=carrier|region ──> Lambda API → Athena (workgroup, giới hạn 1 GB/query)
 ```
 
+## Ảnh giao diện
+
+Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã được thay bằng `quanly@example.com`.
+
+| Tổng quan SLA (Quản lý) | Tra cứu đơn – chế độ tối |
+| --- | --- |
+| ![Tổng quan SLA: tỉ lệ đúng hạn, biểu đồ tỉ lệ trễ theo tuần, theo hãng, theo bang](docs/screenshots/overview.jpg) | ![Tra cứu đơn: trạng thái hiện tại và dòng thời gian, có lần giao thất bại và giao trễ](docs/screenshots/lookup.jpg) |
+
+**Cần xử lý** – lọc nhanh đơn giao trễ / từng giao thất bại / quá hạn, bấm 1 dòng để xem hành trình:
+
+![Cần xử lý: danh sách đơn từng giao thất bại](docs/screenshots/attention.jpg)
+
 ## Cấu trúc thư mục
 
 | Đường dẫn | Nội dung |
