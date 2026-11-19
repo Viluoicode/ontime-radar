@@ -9,19 +9,44 @@ Traffic thật hằng ngày đến từ **Replayer** phát lại ~99k đơn hàn
 
 → Value, người dùng, khách hàng mục tiêu: [docs/product.md](docs/product.md)
 
-```
-EventBridge Scheduler (15') → Lambda Replayer ── reads ──> S3 dataset/chunks/*.jsonl
-                                    │ POST /carriers/{carrier}/webhook  (X-Webhook-Secret)
-Carriers ──────────────────────────>│
-                              API Gateway (HTTP API) → Lambda API (.NET 10 Minimal API)
-                                    │ normalize (adapter per carrier) → SQS FIFO (group = shipment)
-                                    ▼                                   └─ DLQ (after 5 tries) → alarm
-                              Lambda Processor: state machine → DynamoDB (STATE + EVENT history)
-                                    ├─ S3 events/dt=YYYY-MM-DD/*.jsonl  (event lake → Glue table → Athena)
-                                    └─ CloudWatch metric LateDeliveries → Alarm → SNS email
-Ops / CSKH ── GET /shipments/{carrier}/{tracking} ──> Lambda API → DynamoDB (1 Query = state + timeline)
-Quản lý   ── GET /sla/summary?days=30&groupBy=carrier|region ──> Lambda API → Athena (workgroup, giới hạn 1 GB/query)
-```
+## Kiến trúc
+
+![Sơ đồ kiến trúc: hãng vận chuyển và Replayer gửi webhook qua API Gateway, SQS FIFO, Processor ghi DynamoDB và S3; nhân viên dùng website trên CloudFront, đăng nhập Cognito, tra cứu DynamoDB và báo cáo Athena; CloudWatch cảnh báo qua SNS email](docs/diagrams/architecture.png)
+
+File gốc: [docs/diagrams/architecture.drawio](docs/diagrams/architecture.drawio) (mở bằng draw.io).
+Số trên mũi tên ứng với các bước bên dưới; màu của bảng = màu của luồng trên sơ đồ.
+
+**🟠 Luồng 1 – Nhận sự kiện từ hãng vận chuyển**
+
+| Bước | Từ → Đến | Việc gì xảy ra |
+| --- | --- | --- |
+| 1 | Hãng → API Gateway | Gửi webhook, xác thực bằng header secret (không dùng Cognito) |
+| 2 | API Gateway → Lambda API | Adapter của từng hãng chuẩn hóa về 8 trạng thái chung, tạo `eventId` |
+| 3 | Lambda API → SQS FIFO | Xếp hàng theo vận đơn (`MessageGroupId`), trả `202` ngay cho hãng |
+| 4 | SQS → Processor → DynamoDB | State machine quyết định `Applied` / `Stale` / `Rejected` / `Duplicate`, ghi trạng thái + lịch sử bằng 1 transaction |
+| 5 | Processor → S3 | Ghi sự kiện vào `events/dt=YYYY-MM-DD/` (JSONL) để phân tích |
+| 6 | Processor → CloudWatch | Đẩy số đơn đã giao và số đơn giao trễ (theo hãng) |
+| DLQ | SQS → DLQ | Message lỗi 5 lần → chuyển sang DLQ, có cảnh báo |
+| S1–S2 | Scheduler → Replayer → API Gateway | Mỗi 15 phút đọc đơn Olist thật từ S3 và phát lại thành webhook – đi đúng đường như hãng thật |
+
+**🔵 Luồng 2 – Nhân viên dùng dashboard**
+
+| Bước | Từ → Đến | Việc gì xảy ra |
+| --- | --- | --- |
+| 7 | Trình duyệt → CloudFront → S3 web | Tải website qua HTTPS; bucket khoá kín, chỉ CloudFront đọc được (OAC) |
+| 8 | Trình duyệt → Cognito | Đăng nhập (OAuth code + PKCE), nhận token có nhóm `cskh` hoặc `manager` |
+| 9 | Trình duyệt → API Gateway | Gọi API kèm JWT: cổng chặn token sai/hết hạn (401), Lambda chặn sai vai trò (403) |
+| 10 | Lambda API → DynamoDB | Tra cứu đơn: 1 lần Query lấy trạng thái + toàn bộ lịch sử |
+| 11 | Lambda API → Athena → S3 | Báo cáo SLA: SQL trên kho sự kiện (schema ở Glue), chỉ quét các ngày cần, tối đa 1 GB/truy vấn |
+
+**🔴 Luồng 3 – Cảnh báo**
+
+| Bước | Từ → Đến | Việc gì xảy ra |
+| --- | --- | --- |
+| 12 | CloudWatch → SNS | Tỉ lệ giao trễ ≥ 20 % trong 2/3 khung 15 phút liên tiếp, hoặc DLQ > 0 |
+| 13 | SNS → Email | Gửi email khi có sự cố (kèm link trang *Cần xử lý*) và khi đã trở lại bình thường |
+
+Vì sao chọn từng thiết kế: xem [7. Thiết kế đáng chú ý](#7-thiết-kế-đáng-chú-ý-để-trình-bày).
 
 ## Ảnh giao diện
 
