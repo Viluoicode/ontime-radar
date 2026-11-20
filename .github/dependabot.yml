@@ -1,0 +1,14 @@
+# Monthly PRs when a GitHub Action used in .github/workflows has a new version.
+# Review the PR (release notes, CI result) before merging – merging a PR that touches deploy.yml
+# does not deploy by itself (deploy.yml only triggers on src/, template.yaml, web/, global.json).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]          # one PR for all action bumps instead of one per action
+    commit-message:
+      prefix: "ci"
