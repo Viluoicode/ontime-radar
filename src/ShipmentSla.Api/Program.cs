@@ -35,8 +35,13 @@ var tableName = Env("TABLE_NAME");
 var webhookSecret = Env("WEBHOOK_SECRET");
 
 builder.Services.AddSingleton<IAmazonAthena>(_ => new AmazonAthenaClient());
+// Cache of Athena results (see LakeQueryService). Size = number of distinct queries kept; the shipment list
+// has many filter combinations, so the cap keeps memory bounded on a 512 MB Lambda.
+builder.Services.AddMemoryCache(o => o.SizeLimit = 200);
 builder.Services.AddSingleton(sp => new LakeQueryService(
-    sp.GetRequiredService<IAmazonAthena>(), Env("ATHENA_DATABASE"), Env("ATHENA_WORKGROUP")));
+    sp.GetRequiredService<IAmazonAthena>(), Env("ATHENA_DATABASE"), Env("ATHENA_WORKGROUP"),
+    sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
+    sp.GetRequiredService<ILogger<LakeQueryService>>()));
 builder.Services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient());
 builder.Services.AddSingleton<IAmazonDynamoDB>(_ => new AmazonDynamoDBClient());
 builder.Services.AddSingleton(sp => new ShipmentStore(sp.GetRequiredService<IAmazonDynamoDB>(), tableName));

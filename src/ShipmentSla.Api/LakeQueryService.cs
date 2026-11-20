@@ -4,6 +4,7 @@
 using System.Globalization;
 using Amazon.Athena;
 using Amazon.Athena.Model;
+using Microsoft.Extensions.Caching.Memory;
 using ShipmentSla.Core.Analytics;
 
 namespace ShipmentSla.Api;
@@ -16,8 +17,17 @@ public sealed record ShipmentRow(
     string Carrier, string TrackingCode, string? OrderId, string? Region, string? Status,
     bool? IsLate, string? EstimatedDelivery, string? LastEventAt, string? UpdatedAt, long FailedAttempts);
 
-public sealed class LakeQueryService(IAmazonAthena athena, string database, string workGroup)
+// Two cache layers, because the lake only changes every 15 minutes (Replayer schedule):
+//  1. In-memory (per warm Lambda instance), 5 min: repeat dashboard loads return in ~0 ms, no Athena call.
+//  2. Athena query result reuse, 15 min: on a cold instance the identical SQL is answered from the previous
+//     result without scanning S3 again (cheaper, usually faster).
+// The SQL contains the date window, so a new day automatically means a new cache key.
+public sealed class LakeQueryService(
+    IAmazonAthena athena, string database, string workGroup, IMemoryCache cache, ILogger<LakeQueryService> log)
 {
+    public static readonly TimeSpan MemoryTtl = TimeSpan.FromMinutes(5);
+    public const int AthenaReuseMinutes = 15;
+
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     private static DateOnly Today => DateOnly.FromDateTime(DateTime.UtcNow);
@@ -38,24 +48,56 @@ public sealed class LakeQueryService(IAmazonAthena athena, string database, stri
             Bool(c[5]), Text(c[6]), Text(c[7]), Text(c[8]), Long(c[9])))
         .ToList();
 
-    /// <summary>Start the query, wait for it, return all data rows (header row removed).</summary>
+    /// <summary>Cached rows for this SQL, or run it on Athena (and cache the rows).</summary>
     private async Task<List<string?[]>> RunAsync(string sql, CancellationToken ct)
+    {
+        if (cache.TryGetValue(sql, out List<string?[]>? hit) && hit is not null)
+        {
+            log.LogInformation("Lake query: memory cache hit ({Rows} rows)", hit.Count);
+            return hit;
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (rows, reused) = await RunOnAthenaAsync(sql, ct);
+        log.LogInformation("Lake query: Athena {Source} in {Ms} ms ({Rows} rows)",
+            reused ? "reused result" : "scan", sw.ElapsedMilliseconds, rows.Count);
+
+        // Only successful results are cached (failures/timeouts throw before this line).
+        cache.Set(sql, rows, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = MemoryTtl, Size = 1 });
+        return rows;
+    }
+
+    /// <summary>Start the query, wait for it, return all data rows (header row removed).</summary>
+    private async Task<(List<string?[]> Rows, bool Reused)> RunOnAthenaAsync(string sql, CancellationToken ct)
     {
         var start = await athena.StartQueryExecutionAsync(new StartQueryExecutionRequest
         {
             QueryString = sql,
             WorkGroup = workGroup,
-            QueryExecutionContext = new QueryExecutionContext { Database = database }
+            QueryExecutionContext = new QueryExecutionContext { Database = database },
+            ResultReuseConfiguration = new ResultReuseConfiguration
+            {
+                ResultReuseByAgeConfiguration = new ResultReuseByAgeConfiguration
+                {
+                    Enabled = true,
+                    MaxAgeInMinutes = AthenaReuseMinutes
+                }
+            }
         }, ct);
         var id = start.QueryExecutionId;
 
         // Poll (API Gateway HTTP API limit is 30 s, so we give up after ~25 s).
         var deadline = DateTime.UtcNow.AddSeconds(25);
+        bool reused;
         while (true)
         {
             var q = await athena.GetQueryExecutionAsync(new GetQueryExecutionRequest { QueryExecutionId = id }, ct);
             var state = q.QueryExecution.Status.State;
-            if (state == QueryExecutionState.SUCCEEDED) break;
+            if (state == QueryExecutionState.SUCCEEDED)
+            {
+                reused = q.QueryExecution.Statistics?.ResultReuseInformation?.ReusedPreviousResult == true;
+                break;
+            }
             if (state == QueryExecutionState.FAILED || state == QueryExecutionState.CANCELLED)
                 throw new InvalidOperationException($"Athena query {state}: {q.QueryExecution.Status.StateChangeReason}");
             if (DateTime.UtcNow > deadline) throw new TimeoutException("Athena query timed out");
@@ -71,7 +113,7 @@ public sealed class LakeQueryService(IAmazonAthena athena, string database, stri
             rows.AddRange(page.ResultSet.Rows.Select(r => r.Data.Select(d => d.VarCharValue).ToArray()));
             next = page.NextToken;
         } while (next is not null);
-        return rows.Skip(1).ToList();
+        return (rows.Skip(1).ToList(), reused);
     }
 
     private static string? Text(string? s) => string.IsNullOrEmpty(s) ? null : s;

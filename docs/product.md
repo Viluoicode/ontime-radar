@@ -126,6 +126,6 @@ CREATED → CANCELLED
 | Hãng vận chuyển, mã vận đơn, mốc *Đang vận chuyển / Đang giao / Giao thất bại* là **giả lập** | Tỉ lệ giao thất bại không phản ánh hãng thật | Kết nối API/webhook thật của hãng |
 | Replayer phát dữ liệu theo **ngày đặt hàng** | Các tuần giao gần nhất chỉ có đơn giao chậm → tỉ lệ trễ bị đẩy lên (dashboard có ghi chú) | Tự ổn định khi phát thêm; hoặc chỉ tính tuần đã "đủ dữ liệu" |
 | ~~Cảnh báo trễ dùng ngưỡng số đơn / giờ (5)~~ – **đã xử lý 19/11/2026** | Trước đó alarm bật/tắt 3 lần/ngày khi lượng đơn tăng (alert fatigue) | Đã đổi sang **tỉ lệ trễ ≥ 20 % trong 2/3 khung 15 phút** (≥ 10 đơn/khung), kèm email "đã hết sự cố". Đánh đổi: báo chậm hơn (~30–45 phút) |
-| Báo cáo dùng Athena | Mỗi lần tải mất ~1–2 giây | Đủ cho báo cáo; cần nhanh hơn thì tổng hợp sẵn (bảng tổng hợp theo ngày) |
+| Báo cáo dùng Athena | Lần tải đầu mất ~1–2 giây/truy vấn; số liệu có thể chậm tối đa 5–15 phút do cache (dữ liệu vốn chỉ cập nhật mỗi 15 phút) | Đã thêm cache 2 lớp (20/11/2026). Cần nhanh hơn nữa / nhiều người dùng → bảng tổng hợp theo ngày trong DynamoDB |
 | Tài khoản AWS mới chỉ chạy **10 Lambda cùng lúc** | Đã giới hạn Processor 2 luồng để API không bị 503 | Xin nâng quota lên 1.000 |
 | Dữ liệu Olist là **Brazil** (bang SP, RJ…) | Khu vực không phải tỉnh Việt Nam | Thay bằng dữ liệu đơn hàng Việt Nam khi có |
