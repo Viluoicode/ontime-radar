@@ -14,6 +14,10 @@
     <PackageReference Include="AWSSDK.S3" Version="3.7.*" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Classify / ShouldAdvance / Backoff are internal; the service tests check them directly. -->
+    <InternalsVisibleTo Include="ShipmentSla.Service.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\ShipmentSla.Core\ShipmentSla.Core.csproj" />
     <ProjectReference Include="..\ShipmentSla.Infrastructure\ShipmentSla.Infrastructure.csproj" />
   </ItemGroup>

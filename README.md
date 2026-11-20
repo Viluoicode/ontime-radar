@@ -73,6 +73,7 @@ Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã �
 | `src/ShipmentSla.Processor` | Lambda đọc SQS FIFO → DynamoDB + S3 + CloudWatch metric |
 | `src/ShipmentSla.Replayer` | Lambda phát lại đơn Olist thành webhook |
 | `tests/ShipmentSla.Core.Tests` | xUnit: state machine, adapter, round-trip simulator |
+| `tests/ShipmentSla.Service.Tests` | Code chạm AWS với AWS **giả** (không cần tài khoản / Docker): `ShipmentStore` trên DynamoDB giả trong bộ nhớ, Processor (lỗi giữa batch FIFO), API thật trong bộ nhớ (phân quyền 401/403, webhook), luật Replayer |
 | `tools/prepare_olist.py` | Chuyển CSV Olist → `chunks/*.jsonl` cho Replayer |
 | `tools/sample-data/` | 6 đơn **giả lập** đúng định dạng Olist để test trước khi tải Kaggle |
 | `template.yaml` | Toàn bộ hạ tầng (AWS SAM / CloudFormation), gồm Glue database/table + Athena workgroup |
@@ -97,8 +98,20 @@ Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã �
 ```powershell
 cd shipment-sla-service
 dotnet build
-dotnet test        # state machine + 3 adapter + round-trip simulator
+dotnet test        # 182 test: Core (state machine, adapter…) + Service (DynamoDB/SQS/S3/Athena giả)
 ```
+
+Test ưu tiên 3 chỗ dễ mất / sai dữ liệu nhất, đều đã thử **cố ý làm hỏng code** để chắc test bắt được (mutation test):
+
+| Vùng | Test chính | Làm hỏng thử → test đỏ |
+| --- | --- | --- |
+| `ShipmentStore` | Transaction 2 item, `Duplicate` không ghi gì, **xung đột version không bị nhận nhầm là `Duplicate`**, phân trang lịch sử | Nhận diện trùng bằng "bất kỳ lý do nào" → S4 đỏ |
+| Processor | Lỗi giữa batch FIFO: message lỗi **và mọi message sau** báo lỗi, không được xử lý; S3/CloudWatch lỗi không làm hỏng batch | Bỏ quy tắc FIFO → 2 test đỏ |
+| Phân quyền | Ma trận 401/403 qua toàn bộ pipeline; **mọi route GET (trừ `/health`) phải có `RequireAccess`** | Bỏ filter khỏi `/sla/trend` → 2 test đỏ |
+
+`FakeDynamoTable` chỉ hiểu đúng các lệnh / điều kiện code đang dùng và ném `NotSupportedException` với mọi thứ khác,
+nên đổi code mà quên cập nhật bản giả sẽ lộ ngay. Phần tích hợp thật vẫn kiểm trên AWS bằng `demo.ps1` (cảnh 2)
+và `daily-check.ps1 -AuthMatrix`.
 
 ## 2. Deploy lên AWS
 
