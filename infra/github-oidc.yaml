@@ -30,6 +30,68 @@ Conditions:
   CreateProvider: !Equals [!Ref CreateOidcProvider, "true"]
 
 Resources:
+  # ---------------- Permissions boundary for every role the APP stack creates ----------------
+  # A boundary is a ceiling: a role can never do more than (its own policies ∩ this boundary).
+  # The deploy role below may only create/change roles that carry THIS boundary, so even a stolen GitHub
+  # token (or a malicious template change) cannot create e.g. an admin role and hand it to a Lambda.
+  # It lives in this stack (not the app stack) so an app deploy can never loosen its own ceiling.
+  # Template.yaml attaches it by name: arn:...:policy/${AppStackName}-boundary (Globals PermissionsBoundary).
+  AppPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AppStackName}-boundary"
+      Description: Maximum permissions of the shipment-sla Lambda / Scheduler roles
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppStackName}-*"
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppStackName}-*:*"
+          - Sid: DynamoDb
+            Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem,
+                     dynamodb:Query, dynamodb:Scan, dynamodb:BatchGetItem, dynamodb:BatchWriteItem,
+                     dynamodb:ConditionCheckItem, dynamodb:DescribeTable]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppStackName}-*"
+              - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppStackName}-*/index/*"
+          - Sid: Sqs
+            Effect: Allow
+            Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:ChangeMessageVisibility,
+                     sqs:GetQueueAttributes, sqs:GetQueueUrl]
+            Resource: !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppStackName}-*"
+          - Sid: S3
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:DeleteObject, s3:ListBucket,
+                     s3:GetBucketLocation, s3:AbortMultipartUpload, s3:ListMultipartUploadParts,
+                     s3:ListBucketMultipartUploads]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${AppStackName}-*"
+              - !Sub "arn:${AWS::Partition}:s3:::${AppStackName}-*/*"
+          - Sid: Athena
+            Effect: Allow
+            Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults,
+                     athena:StopQueryExecution]
+            Resource: !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AppStackName}-*"
+          - Sid: Glue
+            Effect: Allow
+            Action: [glue:GetDatabase, glue:GetTable, glue:GetPartition, glue:GetPartitions]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/shipment_sla_lake"
+              - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/shipment_sla_lake/*"
+          - Sid: Metrics                    # PutMetricData has no resource-level permissions
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+          - Sid: SchedulerInvokesReplayer
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppStackName}-*"
+
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: CreateProvider
@@ -79,26 +141,51 @@ Resources:
                 Resource: "*"
 
               # --- IAM: only the roles SAM creates for this stack (names start with the stack name) ---
-              - Sid: StackRoles
+              # Creating a role or changing its permissions is allowed ONLY if the role has the boundary
+              # (iam:PermissionsBoundary is the boundary the role has / will have after the call).
+              - Sid: StackRolesWriteOnlyWithBoundary
                 Effect: Allow
                 Action:
                   - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:UpdateRole
-                  - iam:UpdateAssumeRolePolicy
-                  - iam:TagRole
-                  - iam:UntagRole
-                  - iam:PassRole
                   - iam:PutRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:DeleteRolePolicy
                   - iam:AttachRolePolicy
                   - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:PutRolePermissionsBoundary
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppStackName}-*"
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref AppPermissionsBoundary
+              - Sid: StackRolesRead
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
                   - iam:ListRoleTags
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:DeleteRole
                 Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppStackName}-*"
+              - Sid: PassStackRolesToLambdaAndScheduler
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppStackName}-*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: [lambda.amazonaws.com, scheduler.amazonaws.com]
+              # Explicit denies (stronger than any Allow): never remove a boundary, never edit the boundary.
+              - Sid: NeverRemoveBoundary
+                Effect: Deny
+                Action: iam:DeleteRolePermissionsBoundary
+                Resource: "*"
+              - Sid: NeverEditBoundaryPolicy
+                Effect: Deny
+                Action: [iam:CreatePolicyVersion, iam:DeletePolicy, iam:DeletePolicyVersion, iam:SetDefaultPolicyVersion]
+                Resource: !Ref AppPermissionsBoundary
 
               # --- Services the stack uses, scoped to stack-named resources where AWS allows it ---
               - Sid: Lambda
@@ -186,6 +273,9 @@ Resources:
                 Resource: "*"
 
 Outputs:
+  PermissionsBoundaryArn:
+    Description: Boundary attached to every app role (template.yaml Globals → PermissionsBoundary)
+    Value: !Ref AppPermissionsBoundary
   DeployRoleArn:
     Description: Put this in the GitHub environment secret AWS_DEPLOY_ROLE_ARN
     Value: !GetAtt DeployRole.Arn

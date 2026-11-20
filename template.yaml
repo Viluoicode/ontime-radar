@@ -57,6 +57,9 @@ Globals:
     Architectures: [arm64]         # Graviton: ~20% cheaper than x86 for the same duration
     MemorySize: 512
     Timeout: 30
+    # Ceiling for every function role (created in infra/github-oidc.yaml, not here, so this stack cannot
+    # loosen it). The GitHub deploy role may only create/change roles that carry this boundary.
+    PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${AWS::StackName}-boundary"
     Environment:
       Variables:
         TABLE_NAME: !Ref ShipmentsTable
@@ -319,6 +322,8 @@ Resources:
             ScheduleExpression: rate(15 minutes)
             State: !Ref ReplayState
             Input: "{}"
+            # SAM creates a separate role for the scheduler; Globals do not reach it → set explicitly.
+            PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${AWS::StackName}-boundary"
 
   # Keep logs 14 days instead of forever (cost control).
   ApiLogGroup:

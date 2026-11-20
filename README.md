@@ -157,7 +157,12 @@ aws cloudformation describe-stacks --stack-name github-oidc-deploy --region ap-s
 - Quyền của role giới hạn theo dịch vụ stack dùng và theo tên `shipment-sla-*` khi AWS cho phép
   (CloudFormation, IAM role, Lambda, SQS, DynamoDB, S3, log, SNS, alarm). API Gateway, Cognito và CloudFront
   dùng ID tự sinh nên chỉ giới hạn được theo dịch vụ. Role deploy hạ tầng luôn có quyền lớn
-  (tạo được Lambda, IAM role) – lớp bảo vệ chính là **điều kiện tin cậy + bước duyệt + không có key dài hạn**.
+  (tạo được Lambda, IAM role) – lớp bảo vệ chính là **điều kiện tin cậy + bước duyệt + không có key dài hạn**,
+  thêm **permissions boundary**: role deploy chỉ tạo/sửa được role có gắn boundary `shipment-sla-boundary`
+  (trần quyền: log, DynamoDB/SQS/S3/Athena/Glue của stack, PutMetricData, gọi Lambda của stack).
+- Thêm quyền mới cho Lambda (vd. dịch vụ AWS khác) → phải thêm vào **cả** `Policies` trong `template.yaml`
+  **và** boundary trong `infra/github-oidc.yaml` (cập nhật stack `github-oidc-deploy` trước), nếu không
+  Lambda sẽ bị `AccessDenied` dù policy đã cho phép.
 - Log của repo public là công khai: số tài khoản AWS được che (`***`) trong log.
 
 ## 2b. Đăng nhập (Cognito)
@@ -367,6 +372,7 @@ Hoặc xem tay:
 | **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
 | **Cache kết quả Athena 2 lớp** (bộ nhớ Lambda 5 phút + Athena *query result reuse* 15 phút) | Dữ liệu chỉ đổi mỗi 15 phút (lịch Replayer) → mở lại dashboard không cần chạy lại truy vấn. **Đo thật (20/11/2026, 38 truy vấn):** quét S3 ≈ 2,4 s · Athena dùng lại kết quả ≈ 0,55 s · bộ nhớ ≈ 0 ms; **79 % truy vấn không phải quét S3**. Có 4 bản Lambda chạy song song (mỗi bản bộ nhớ riêng) → lớp Athena đỡ cho bản chưa có cache. Đã cân nhắc bảng tổng hợp DynamoDB: nhanh hơn nữa nhưng thêm 1 nguồn số liệu phải giữ khớp và phải nạp lại dữ liệu cũ – để dành khi dữ liệu/người dùng lớn |
 | **Throttling API Gateway: 10 req/s, burst 20 mỗi route** | Quá giới hạn → 429 ngay ở cổng, Lambda không chạy → một đợt dồn request không thể chiếm hết 10 Lambda chạy song song của tài khoản hay đẩy hoá đơn lên. Replayer và `demo.ps1` gửi lại khi gặp 429 (cùng payload = cùng `eventId`, không bị áp dụng 2 lần) |
+| **Permissions boundary** cho mọi role của stack | Role deploy chỉ được tạo/sửa role **có gắn boundary** → kể cả token GitHub bị lộ cũng không tạo được role admin cho Lambda. Boundary nằm ở stack `infra/` (stack ứng dụng không tự nới được), có Deny tường minh việc gỡ / sửa boundary |
 | **Deploy qua GitHub Actions + OIDC, có bước duyệt** | Không có access key dài hạn để lộ; role chỉ tin đúng repo + environment `production`; stack quyền tách riêng nên deploy lỗi không tự xoá quyền deploy |
 
 ## 8. Chi phí & dọn dẹp
