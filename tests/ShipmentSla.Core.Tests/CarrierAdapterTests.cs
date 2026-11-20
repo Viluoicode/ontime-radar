@@ -57,6 +57,72 @@ public class CarrierAdapterTests
     public void Invalid_payloads_are_rejected(string carrier, string json) =>
         Assert.Throws<CarrierPayloadException>(() => Parse(carrier, json));
 
+    // ---------- tracking code: ^[A-Za-z0-9._-]{1,64}$ in all 3 adapters ----------
+
+    private static string PayloadWithTracking(string carrier, string tracking)
+    {
+        var code = JsonSerializer.Serialize(tracking);   // proper JSON escaping (quotes, \n, unicode)
+        return carrier switch
+        {
+            "ghn" => $$"""{"order_code":{{code}},"status":"picked","updated_date":"2017-10-05T08:00:00Z"}""",
+            "ghtk" => $$"""{"label_id":{{code}},"status_id":3,"action_time":"2017-10-05T15:00:00+07:00"}""",
+            "jt" => $$"""{"billCode":{{code}},"scanType":"PICKUP","scanTime":1507190400000}""",
+            _ => throw new ArgumentOutOfRangeException(nameof(carrier))
+        };
+    }
+
+    public static TheoryData<string, string> ValidTrackingCodes()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var carrier in new[] { "ghn", "ghtk", "jt" })
+            foreach (var code in new[] { "GHN1A2B3C4D", "S1.A1.123456", "JT1234567890", "DEMO1120_x-y.z", "a", new string('9', 64) })
+                data.Add(carrier, code);
+        return data;
+    }
+
+    public static TheoryData<string, string> InvalidTrackingCodes()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var carrier in new[] { "ghn", "ghtk", "jt" })
+            foreach (var code in new[]
+                     {
+                         new string('9', 65),   // too long
+                         "GHN 123",             // space
+                         "ghn#GHN1",            // '#' is our key separator
+                         "../etc/passwd",       // '/' (path-like)
+                         "GHN1\n",              // trailing newline ($ vs \z)
+                         "ĐƠN1",                // non-ASCII letters
+                         "GHN1;DROP",           // ';'
+                         "<script>",            // HTML
+                     })
+                data.Add(carrier, code);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(ValidTrackingCodes))]
+    public void Valid_tracking_codes_are_accepted(string carrier, string code) =>
+        Assert.Equal(code, Parse(carrier, PayloadWithTracking(carrier, code)).TrackingCode);
+
+    [Theory]
+    [MemberData(nameof(InvalidTrackingCodes))]
+    public void Invalid_tracking_codes_are_rejected(string carrier, string code)
+    {
+        var ex = Assert.Throws<CarrierPayloadException>(() => Parse(carrier, PayloadWithTracking(carrier, code)));
+        Assert.Contains("A-Z a-z 0-9 . _ -", ex.Message);
+    }
+
+    [Fact]
+    public void Tracking_code_rule_matches_spec()
+    {
+        Assert.True(TrackingCodes.IsValid("A.b_C-9"));
+        Assert.True(TrackingCodes.IsValid(new string('x', 64)));
+        Assert.False(TrackingCodes.IsValid(""));
+        Assert.False(TrackingCodes.IsValid(null));
+        Assert.False(TrackingCodes.IsValid(new string('x', 65)));
+        Assert.False(TrackingCodes.IsValid("ABC\n"));
+    }
+
     [Fact]
     public void Same_webhook_twice_gives_same_event_id()
     {

@@ -38,9 +38,30 @@ public static class EventIds
     }
 }
 
+/// <summary>Rules for the carrier's tracking code (it becomes part of keys, URLs and S3/Athena data).</summary>
+public static class TrackingCodes
+{
+    public const int MaxLength = 64;
+
+    // \z (not $): in .NET "$" also matches before a trailing "\n", so "ABC\n" would pass with ^...$.
+    private static readonly Regex Allowed = new(@"\A[A-Za-z0-9._-]{1,64}\z", RegexOptions.CultureInvariant);
+
+    public static bool IsValid(string? code) => code is not null && Allowed.IsMatch(code);
+}
+
 /// <summary>Small helpers so each adapter stays short and gives clear 400 messages.</summary>
 internal static class Json
 {
+    /// <summary>Required tracking code: 1–64 chars of A-Z a-z 0-9 . _ - (rejects '#', '/', spaces, unicode...).</summary>
+    public static string RequiredTrackingCode(JsonElement e, string name)
+    {
+        var s = RequiredString(e, name);
+        return TrackingCodes.IsValid(s)
+            ? s
+            : throw new CarrierPayloadException(
+                $"field '{name}' must be 1-{TrackingCodes.MaxLength} characters of A-Z a-z 0-9 . _ -");
+    }
+
     public static string RequiredString(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s
             ? s
@@ -90,7 +111,7 @@ public sealed class GhnAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
-        var tracking = Json.RequiredString(p, "order_code");
+        var tracking = Json.RequiredTrackingCode(p, "order_code");
         var raw = Json.RequiredString(p, "status");
         if (!StatusMap.TryGetValue(raw, out var status))
             throw new CarrierPayloadException($"unknown GHN status '{raw}'");
@@ -123,7 +144,7 @@ public sealed class GhtkAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
-        var tracking = Json.RequiredString(p, "label_id");
+        var tracking = Json.RequiredTrackingCode(p, "label_id");
         if (!p.TryGetProperty("status_id", out var sid) || !sid.TryGetInt32(out var code))
             throw new CarrierPayloadException("missing integer field 'status_id'");
         if (!StatusMap.TryGetValue(code, out var status))
@@ -159,7 +180,7 @@ public sealed class JtAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
-        var tracking = Json.RequiredString(p, "billCode");
+        var tracking = Json.RequiredTrackingCode(p, "billCode");
         var raw = Json.RequiredString(p, "scanType");
         if (!StatusMap.TryGetValue(raw, out var status))
             throw new CarrierPayloadException($"unknown J&T scanType '{raw}'");
