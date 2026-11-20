@@ -16,9 +16,10 @@ using ShipmentSla.Infrastructure;
 
 namespace ShipmentSla.Replayer;
 
-// Retries is last so tools/daily-check.ps1 (regex on "CursorAfter … Failed = n") keeps working.
+// Failed = temporary failures (the next run resends these orders); Rejected = refused for bad data (skipped).
+// Retries / Rejected are last so tools/daily-check.ps1 (regex on "CursorAfter … Failed = n") keeps working.
 public sealed record ReplayResult(int CursorBefore, int CursorAfter, int Orders, int Sent, int Failed, bool DatasetFinished,
-    int Retries = 0);
+    int Retries = 0, int Rejected = 0);
 
 public sealed class Function
 {
@@ -65,27 +66,32 @@ public sealed class Function
         var orders = lines.Skip(cursor % _chunkSize).Take(_ordersPerRun).Select(CarrierSimulator.ParseLine).ToList();
 
         // 3) POST every step in chronological order, like the carrier's system would.
-        int sent = 0, failed = 0;
+        int sent = 0, failed = 0, rejected = 0;
         foreach (var order in orders)
         {
             foreach (var step in order.Events.OrderBy(s => s.At))
             {
-                var ok = await PostAsync(order.Carrier, CarrierSimulator.BuildPayload(order, step), context);
-                if (ok) sent++; else failed++;
+                switch (await PostAsync(order.Carrier, CarrierSimulator.BuildPayload(order, step), context))
+                {
+                    case PostOutcome.Sent: sent++; break;
+                    case PostOutcome.Rejected: rejected++; break;
+                    default: failed++; break;
+                }
             }
         }
 
-        // 4) Only move forward if the API mostly worked; otherwise retry the same orders next run
-        //    (safe: duplicates are detected by eventId).
-        var total = sent + failed;
-        var advance = failed <= total / 2; // also true for an empty batch → skip to next chunk
+        // 4) Move forward only if NOTHING failed temporarily; otherwise the next run resends the same orders,
+        //    so no event is lost (safe: already-processed webhooks come back as Duplicate via eventId).
+        //    Permanently rejected webhooks (400/404/422: bad data) would fail again on every retry → they are
+        //    logged and counted as Rejected, and do not block the replay.
+        var advance = ShouldAdvance(failed);
         // Move to the next chunk when this one is used up.
         var next = !advance ? cursor
                  : orders.Count < _ordersPerRun ? (chunkIndex + 1) * _chunkSize
                  : cursor + orders.Count;
         if (next != cursor) await _store.SetReplayCursorAsync(next);
 
-        var result = new ReplayResult(cursor, next, orders.Count, sent, failed, DatasetFinished: false, _retries);
+        var result = new ReplayResult(cursor, next, orders.Count, sent, failed, DatasetFinished: false, _retries, rejected);
         context.Logger.LogInformation($"Replay {result}");
         return result;
     }
@@ -96,7 +102,19 @@ public sealed class Function
     private const int MaxAttempts = 5;
     private int _retries;
 
-    private async Task<bool> PostAsync(string carrier, string json, ILambdaContext context)
+    internal enum PostOutcome { Sent, Rejected, Failed }
+
+    /// <summary>Advance the cursor only when no webhook failed temporarily (an empty run also advances).</summary>
+    internal static bool ShouldAdvance(int temporarilyFailed) => temporarilyFailed == 0;
+
+    /// <summary>400 / 404 / 422 = the API understood and refused the data: resending cannot help.
+    /// Everything else (401 wrong secret, 403, 429, 5xx, network) may succeed later → Failed.</summary>
+    internal static PostOutcome Classify(int statusCode) =>
+        statusCode is >= 200 and < 300 ? PostOutcome.Sent
+        : statusCode is 400 or 404 or 422 ? PostOutcome.Rejected
+        : PostOutcome.Failed;
+
+    private async Task<PostOutcome> PostAsync(string carrier, string json, ILambdaContext context)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -108,22 +126,24 @@ public sealed class Function
             try
             {
                 using var response = await Http.SendAsync(request);
-                if (response.IsSuccessStatusCode) return true;
-
                 var code = (int)response.StatusCode;
+                var outcome = Classify(code);
+                if (outcome == PostOutcome.Sent) return outcome;
+
                 if (code is 429 or 502 or 503 or 504 && attempt < MaxAttempts)
                 {
                     _retries++;
                     await Task.Delay(Backoff(attempt, response.Headers.RetryAfter?.Delta));
                     continue;
                 }
-                context.Logger.LogWarning($"{carrier} webhook → {code} after {attempt} attempt(s): {await response.Content.ReadAsStringAsync()}");
-                return false;
+                context.Logger.LogWarning(
+                    $"{carrier} webhook {outcome} → {code} after {attempt} attempt(s): {await response.Content.ReadAsStringAsync()}");
+                return outcome;
             }
             catch (Exception ex)
             {
                 context.Logger.LogWarning($"{carrier} webhook failed: {ex.Message}");
-                return false;
+                return PostOutcome.Failed;
             }
         }
     }
