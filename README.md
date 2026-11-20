@@ -46,6 +46,9 @@ Số trên mũi tên ứng với các bước bên dưới; màu của bảng = 
 | 12 | CloudWatch → SNS | Tỉ lệ giao trễ ≥ 20 % trong 2/3 khung 15 phút liên tiếp, hoặc DLQ > 0 |
 | 13 | SNS → Email | Gửi email khi có sự cố (kèm link trang *Cần xử lý*) và khi đã trở lại bình thường |
 
+**⚪ Deploy** – `git push` → GitHub Actions (test, chờ duyệt) → OIDC → IAM role tạm (≤ 1 giờ) →
+SAM / CloudFormation. Không có access key nào lưu trên GitHub – xem [2a](#2a-deploy-tự-động-github-actions--oidc).
+
 Vì sao chọn từng thiết kế: xem [7. Thiết kế đáng chú ý](#7-thiết-kế-đáng-chú-ý-để-trình-bày).
 
 ## Ảnh giao diện
@@ -74,6 +77,8 @@ Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã �
 | `tools/sample-data/` | 6 đơn **giả lập** đúng định dạng Olist để test trước khi tải Kaggle |
 | `template.yaml` | Toàn bộ hạ tầng (AWS SAM / CloudFormation), gồm Glue database/table + Athena workgroup |
 | `.github/workflows/ci.yml` | CI: build + test .NET, `sam validate --lint` |
+| `.github/workflows/deploy.yml` | CD: test → chờ duyệt → OIDC → `sam deploy` + website + kiểm tra `/health` |
+| `infra/github-oidc.yaml` | OIDC provider + IAM role cho GitHub Actions (deploy 1 lần, tách khỏi stack chính) |
 
 ## 0. Cài đặt (1 lần)
 
@@ -112,6 +117,43 @@ sam deploy --guided
 
 Sau khi deploy: **mở email, bấm Confirm subscription** của SNS. Ghi lại các Outputs
 (`ApiUrl`, `DataBucketName`, `TableName`, `ReplayerFunctionName`, `UserPoolId`).
+
+## 2a. Deploy tự động (GitHub Actions + OIDC)
+
+Sau khi cài 1 lần, mỗi lần push lên `main` có thay đổi ở `src/`, `template.yaml`, `web/` hoặc
+`global.json`: **test → chờ bạn bấm Approve → deploy stack → tải website → kiểm tra `/health`**.
+Sửa tài liệu thì không deploy. Có thể chạy tay: tab *Actions* → *Deploy* → *Run workflow*.
+
+**Cài 1 lần (~10 phút):**
+
+```powershell
+# 1) Tạo OIDC provider + role deploy (chạy từ máy, bằng tài khoản quản trị)
+aws cloudformation deploy --stack-name github-oidc-deploy --template-file infra/github-oidc.yaml `
+    --capabilities CAPABILITY_NAMED_IAM --region ap-southeast-1
+#    (tài khoản đã có OIDC provider của GitHub → thêm: --parameter-overrides CreateOidcProvider=false)
+
+# 2) Lấy ARN của role (dùng ở bước 4, KHÔNG phải access key)
+aws cloudformation describe-stacks --stack-name github-oidc-deploy --region ap-southeast-1 `
+    --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+```
+
+3. GitHub → *Settings* → *Environments* → **New environment** `production`
+   → bật **Required reviewers** (chọn chính bạn) → *Deployment branches*: chỉ `main`.
+4. Trong environment `production` → **Add environment secret** `AWS_DEPLOY_ROLE_ARN` = ARN ở bước 2.
+5. *Actions* → *Deploy* → *Run workflow* → *Review deployments* → **Approve**.
+
+**Lưu ý:**
+
+- Workflow **không truyền tham số** → SAM giữ nguyên giá trị cũ trong stack (`WebhookSecret`, `AlertEmail`,
+  `ReplayState`…), nên không có bí mật nào trên GitHub. Muốn **đổi** một tham số hoặc thêm tham số mới
+  → deploy 1 lần từ máy (`sam deploy` dùng `samconfig.toml`).
+- Role chỉ nhận token khi đủ 3 điều kiện: đúng repo, đúng environment `production` (đã được duyệt),
+  audience `sts.amazonaws.com`. Token hết hạn sau ≤ 1 giờ.
+- Quyền của role giới hạn theo dịch vụ stack dùng và theo tên `shipment-sla-*` khi AWS cho phép
+  (CloudFormation, IAM role, Lambda, SQS, DynamoDB, S3, log, SNS, alarm). API Gateway, Cognito và CloudFront
+  dùng ID tự sinh nên chỉ giới hạn được theo dịch vụ. Role deploy hạ tầng luôn có quyền lớn
+  (tạo được Lambda, IAM role) – lớp bảo vệ chính là **điều kiện tin cậy + bước duyệt + không có key dài hạn**.
+- Log của repo public là công khai: số tài khoản AWS được che (`***`) trong log.
 
 ## 2b. Đăng nhập (Cognito)
 
@@ -318,6 +360,7 @@ Hoặc xem tay:
 | **Cảnh báo theo TỈ LỆ trễ, 2/3 khung 15 phút** | Ngưỡng "số đơn trễ / giờ" bật tắt liên tục khi lượng đơn tăng (alert fatigue); tỉ lệ + yêu cầu kéo dài → ít email giả, có email "đã hết sự cố" |
 | **CloudFront + S3 riêng khoá kín (OAC)** | Website chạy HTTPS toàn cầu gần như 0 USD; không ai đọc thẳng được bucket, bucket web tách khỏi dữ liệu đơn hàng |
 | **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
+| **Deploy qua GitHub Actions + OIDC, có bước duyệt** | Không có access key dài hạn để lộ; role chỉ tin đúng repo + environment `production`; stack quyền tách riêng nên deploy lỗi không tự xoá quyền deploy |
 
 ## 8. Chi phí & dọn dẹp
 
@@ -340,6 +383,7 @@ sam delete --stack-name shipment-sla
 - [x] Đưa website lên S3 + CloudFront
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
+- [ ] Deploy tự động bằng GitHub Actions + OIDC (đã có workflow, chờ chạy lần đầu)
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo
 
 ## Dữ liệu

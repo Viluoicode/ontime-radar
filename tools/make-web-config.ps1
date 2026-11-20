@@ -7,7 +7,7 @@ param(
     [string]$StackName = "shipment-sla",
     [string]$Region = "ap-southeast-1",
     [string]$RedirectUri = "http://localhost:5500/",
-    [string]$OutFile = (Join-Path $PSScriptRoot "..\web\js\config.js")
+    [string]$OutFile = (Join-Path (Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) "web") "js") "config.js")
 )
 $ErrorActionPreference = "Stop"
 

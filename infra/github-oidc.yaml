@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  GitHub Actions -> AWS without access keys (OIDC). Creates the GitHub OIDC provider and the role
+  that .github/workflows/deploy.yml assumes to deploy the shipment-sla stack.
+  Deploy ONCE from your machine (see README "Deploy tự động"); kept separate from the app stack so a
+  failed app deploy can never remove its own deploy permissions.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: Viluoicode/ontime-radar
+    Description: owner/repo allowed to assume the role
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    Description: GitHub environment (with required reviewers) the deploy job must run in
+  AppStackName:
+    Type: String
+    Default: shipment-sla
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: '"false" if the account already has token.actions.githubusercontent.com'
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  # Name deliberately does NOT start with "${AppStackName}-": the policy below may manage roles with that
+  # prefix (the Lambda roles SAM creates), and must not be able to edit its own permissions.
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "github-deploy-${AppStackName}"
+      Description: Assumed by GitHub Actions (OIDC) to deploy the shipment-sla stack and website
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Only jobs of THIS repo running in the protected environment (= after a reviewer approved).
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:environment:${GitHubEnvironment}"
+      Policies:
+        - PolicyName: deploy-shipment-sla
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # --- CloudFormation: only the app stack + SAM's artifact-bucket stack ---
+              - Sid: CloudFormationStacks
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31"
+              - Sid: CloudFormationRead
+                Effect: Allow
+                Action: [cloudformation:ValidateTemplate, cloudformation:GetTemplateSummary, cloudformation:ListStacks]
+                Resource: "*"
+
+              # --- IAM: only the roles SAM creates for this stack (names start with the stack name) ---
+              - Sid: StackRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRoleTags
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppStackName}-*"
+
+              # --- Services the stack uses, scoped to stack-named resources where AWS allows it ---
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppStackName}-*"
+              - Sid: LambdaEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:CreateEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                  - lambda:TagResource
+                  - lambda:ListTags
+                Resource: "*"
+              - Sid: Sqs
+                Effect: Allow
+                Action: sqs:*
+                Resource: !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppStackName}-*"
+              - Sid: DynamoDb
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppStackName}-*"
+              - Sid: S3StackAndArtifactBuckets
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppStackName}-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppStackName}-*/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-samclisourcebucket-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/*"
+              - Sid: Logs
+                Effect: Allow
+                Action: logs:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppStackName}-*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppStackName}-*:*"
+              - Sid: LogsDescribe
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: Sns
+                Effect: Allow
+                Action: sns:*
+                Resource: !Sub "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppStackName}-*"
+              - Sid: CloudWatchAlarms
+                Effect: Allow
+                Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:TagResource,
+                         cloudwatch:UntagResource, cloudwatch:ListTagsForResource]
+                Resource: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppStackName}-*"
+              - Sid: CloudWatchDescribe
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Sid: Glue
+                Effect: Allow
+                Action: glue:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/shipment_sla_lake"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/shipment_sla_lake/*"
+              - Sid: Athena
+                Effect: Allow
+                Action: athena:*
+                Resource: !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AppStackName}-*"
+              - Sid: Scheduler
+                Effect: Allow
+                Action: scheduler:*
+                Resource: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*"
+              # API Gateway, Cognito and CloudFront identify resources by generated IDs, not names,
+              # so they can only be limited to the service (and region where the ARN has one).
+              - Sid: ApiGateway
+                Effect: Allow
+                Action: apigateway:*
+                Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/*"
+              - Sid: Cognito
+                Effect: Allow
+                Action: cognito-idp:*
+                Resource: "*"
+              - Sid: CloudFront
+                Effect: Allow
+                Action: cloudfront:*
+                Resource: "*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Put this in the GitHub environment secret AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn

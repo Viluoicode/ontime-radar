@@ -1,0 +1,84 @@
+name: Deploy
+# Push to main that changes the app → test → wait for approval (environment "production")
+# → assume an AWS role via OIDC (no access keys) → sam deploy → upload website → health check.
+# One-time setup: README section "Deploy tự động (GitHub Actions + OIDC)".
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "template.yaml"
+      - "web/**"
+      - "global.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false      # never stop a CloudFormation update half-way
+
+env:
+  AWS_REGION: ap-southeast-1
+  STACK_NAME: shipment-sla
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet test -c Release
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production        # required reviewers → the job waits for your Approve
+    permissions:
+      id-token: write              # lets the job request the OIDC token for AWS
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: gh-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true    # logs of a public repo are public
+
+      - name: Build
+        run: sam build
+
+      # No --parameter-overrides on purpose: SAM then keeps every parameter's PREVIOUS value
+      # (WebhookSecret, AlertEmail, ReplayState...), so no secret is stored in GitHub.
+      # A NEW template parameter must be added here (or deployed once from a machine) – see README.
+      - name: Deploy stack
+        run: >
+          sam deploy
+          --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          --capabilities CAPABILITY_IAM
+          --resolve-s3 --s3-prefix "$STACK_NAME"
+          --no-confirm-changeset --no-fail-on-empty-changeset --no-progressbar
+
+      - name: Upload website
+        shell: pwsh
+        run: ./tools/deploy-web.ps1 -StackName $env:STACK_NAME -Region $env:AWS_REGION
+
+      - name: Health check
+        run: |
+          api=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          for i in 1 2 3 4 5; do
+            if curl -fsS "$api/health"; then echo; echo "API healthy"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::/health did not answer 200"; exit 1

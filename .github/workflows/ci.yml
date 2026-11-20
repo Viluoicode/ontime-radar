@@ -18,7 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/setup-sam@v2
-      - run: sam validate --lint --region ap-southeast-1
+      - run: |
+          sam validate --lint --region ap-southeast-1
+          sam validate --lint --region ap-southeast-1 -t infra/github-oidc.yaml
         env:
           AWS_DEFAULT_REGION: ap-southeast-1
           AWS_ACCESS_KEY_ID: dummy

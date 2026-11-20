@@ -15,10 +15,13 @@ if (-not $o.WebBucketName) { throw "Stack chưa có WebBucketName – hãy chạ
 
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("ontime-web-" + [guid]::NewGuid().ToString("N"))
 try {
-    Copy-Item -Path (Join-Path $PSScriptRoot "..\web") -Destination $stage -Recurse
-    Remove-Item (Join-Path $stage "js\config.example.js") -ErrorAction SilentlyContinue
+    # Paths are joined one segment at a time so the script also runs on Linux (GitHub Actions, pwsh).
+    $js = Join-Path $stage "js"
+    Copy-Item -Path (Join-Path (Split-Path $PSScriptRoot -Parent) "web") -Destination $stage -Recurse
+    Remove-Item (Join-Path $js "config.example.js") -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $js "config.js") -ErrorAction SilentlyContinue   # local copy (localhost) – replaced below
     & (Join-Path $PSScriptRoot "make-web-config.ps1") -StackName $StackName -Region $Region `
-        -RedirectUri $o.WebUrl -OutFile (Join-Path $stage "js\config.js")
+        -RedirectUri $o.WebUrl -OutFile (Join-Path $js "config.js")
 
     # Browsers re-check after 5 minutes; CloudFront is invalidated right after the upload.
     aws s3 sync $stage "s3://$($o.WebBucketName)/" --delete --region $Region --only-show-errors `
