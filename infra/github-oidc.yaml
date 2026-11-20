@@ -8,8 +8,11 @@ Description: >-
 Parameters:
   GitHubRepo:
     Type: String
-    Default: Viluoicode/ontime-radar
-    Description: owner/repo allowed to assume the role
+    # GitHub's OIDC "sub" claim now carries immutable IDs: owner@<ownerId>/repo@<repoId>.
+    # Matching the IDs (public, not secret) means a re-created repo with the same name cannot assume the role.
+    # Find them in a failed AssumeRoleWithWebIdentity event in CloudTrail, or via the GitHub API.
+    Default: Viluoicode@223611814/ontime-radar@1459692720
+    Description: owner@ownerId/repo@repoId allowed to assume the role (as it appears in the OIDC sub claim)
   GitHubEnvironment:
     Type: String
     Default: production

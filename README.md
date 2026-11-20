@@ -131,6 +131,8 @@ Sửa tài liệu thì không deploy. Có thể chạy tay: tab *Actions* → *D
 aws cloudformation deploy --stack-name github-oidc-deploy --template-file infra/github-oidc.yaml `
     --capabilities CAPABILITY_NAMED_IAM --region ap-southeast-1
 #    (tài khoản đã có OIDC provider của GitHub → thêm: --parameter-overrides CreateOidcProvider=false)
+#    Cập nhật stack ĐÃ CÓ: lệnh này giữ giá trị cũ của tham số không truyền vào (kể cả khi đổi Default
+#    trong file) → muốn đổi thì truyền rõ, vd. --parameter-overrides "GitHubRepo=owner@id/repo@id"
 
 # 2) Lấy ARN của role (dùng ở bước 4, KHÔNG phải access key)
 aws cloudformation describe-stacks --stack-name github-oidc-deploy --region ap-southeast-1 `
@@ -149,6 +151,9 @@ aws cloudformation describe-stacks --stack-name github-oidc-deploy --region ap-s
   → deploy 1 lần từ máy (`sam deploy` dùng `samconfig.toml`).
 - Role chỉ nhận token khi đủ 3 điều kiện: đúng repo, đúng environment `production` (đã được duyệt),
   audience `sts.amazonaws.com`. Token hết hạn sau ≤ 1 giờ.
+  Repo được nhận diện bằng **ID cố định** của GitHub (`owner@id/repo@id` trong claim `sub`), nên tạo lại
+  repo trùng tên cũng không giả mạo được. Fork/đổi chủ repo → sửa tham số `GitHubRepo` (lấy ID trong
+  CloudTrail, sự kiện `AssumeRoleWithWebIdentity` bị từ chối).
 - Quyền của role giới hạn theo dịch vụ stack dùng và theo tên `shipment-sla-*` khi AWS cho phép
   (CloudFormation, IAM role, Lambda, SQS, DynamoDB, S3, log, SNS, alarm). API Gateway, Cognito và CloudFront
   dùng ID tự sinh nên chỉ giới hạn được theo dịch vụ. Role deploy hạ tầng luôn có quyền lớn
@@ -383,7 +388,7 @@ sam delete --stack-name shipment-sla
 - [x] Đưa website lên S3 + CloudFront
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
-- [ ] Deploy tự động bằng GitHub Actions + OIDC (đã có workflow, chờ chạy lần đầu)
+- [x] Deploy tự động bằng GitHub Actions + OIDC, có bước duyệt (chạy thành công 20/11/2026)
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo
 
 ## Dữ liệu
