@@ -73,6 +73,13 @@ Globals:
     # Every route needs a valid Cognito access token unless the route says Authorizer: NONE.
     # API Gateway verifies signature, expiry, issuer and client id → 401 before Lambda runs.
     # The role (cskh / manager) is checked in the API code (AccessRules) → 403.
+    # Throttling, applied to EVERY route separately (token bucket): 10 requests/s sustained, bursts of 20.
+    # Excess requests get 429 from API Gateway – before Lambda runs – so a flood (or a bug in a carrier's
+    # retry loop) cannot use up this account's 10 concurrent Lambdas or the bill. Callers retry 429 with
+    # backoff (the Replayer does). Real carriers sending more than 10/s would need this raised.
+    DefaultRouteSettings:
+      ThrottlingBurstLimit: 20
+      ThrottlingRateLimit: 10
     Auth:
       DefaultAuthorizer: CognitoJwt
       Authorizers:

@@ -366,6 +366,7 @@ Hoặc xem tay:
 | **CloudFront + S3 riêng khoá kín (OAC)** | Website chạy HTTPS toàn cầu gần như 0 USD; không ai đọc thẳng được bucket, bucket web tách khỏi dữ liệu đơn hàng |
 | **Phân quyền theo nhóm trong code (`AccessRules`)** | API Gateway không phân quyền theo nhóm Cognito được → lớp thứ 2 trả 403, có unit test cho ma trận quyền |
 | **Cache kết quả Athena 2 lớp** (bộ nhớ Lambda 5 phút + Athena *query result reuse* 15 phút) | Dữ liệu chỉ đổi mỗi 15 phút (lịch Replayer) → mở lại dashboard không cần chạy lại truy vấn. **Đo thật (20/11/2026, 38 truy vấn):** quét S3 ≈ 2,4 s · Athena dùng lại kết quả ≈ 0,55 s · bộ nhớ ≈ 0 ms; **79 % truy vấn không phải quét S3**. Có 4 bản Lambda chạy song song (mỗi bản bộ nhớ riêng) → lớp Athena đỡ cho bản chưa có cache. Đã cân nhắc bảng tổng hợp DynamoDB: nhanh hơn nữa nhưng thêm 1 nguồn số liệu phải giữ khớp và phải nạp lại dữ liệu cũ – để dành khi dữ liệu/người dùng lớn |
+| **Throttling API Gateway: 10 req/s, burst 20 mỗi route** | Quá giới hạn → 429 ngay ở cổng, Lambda không chạy → một đợt dồn request không thể chiếm hết 10 Lambda chạy song song của tài khoản hay đẩy hoá đơn lên. Replayer và `demo.ps1` gửi lại khi gặp 429 (cùng payload = cùng `eventId`, không bị áp dụng 2 lần) |
 | **Deploy qua GitHub Actions + OIDC, có bước duyệt** | Không có access key dài hạn để lộ; role chỉ tin đúng repo + environment `production`; stack quyền tách riêng nên deploy lỗi không tự xoá quyền deploy |
 
 ## 8. Chi phí & dọn dẹp

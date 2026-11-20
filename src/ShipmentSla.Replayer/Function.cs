@@ -16,7 +16,9 @@ using ShipmentSla.Infrastructure;
 
 namespace ShipmentSla.Replayer;
 
-public sealed record ReplayResult(int CursorBefore, int CursorAfter, int Orders, int Sent, int Failed, bool DatasetFinished);
+// Retries is last so tools/daily-check.ps1 (regex on "CursorAfter … Failed = n") keeps working.
+public sealed record ReplayResult(int CursorBefore, int CursorAfter, int Orders, int Sent, int Failed, bool DatasetFinished,
+    int Retries = 0);
 
 public sealed class Function
 {
@@ -40,6 +42,7 @@ public sealed class Function
     // The scheduler sends an (empty) JSON object; we do not need its content.
     public async Task<ReplayResult> Handler(Dictionary<string, object>? input, ILambdaContext context)
     {
+        _retries = 0;                       // the Function object is reused by warm invocations
         var cursor = await _store.GetReplayCursorAsync();
         var chunkIndex = cursor / _chunkSize;
         var key = $"{_prefix}{chunkIndex:D5}.jsonl";
@@ -82,31 +85,54 @@ public sealed class Function
                  : cursor + orders.Count;
         if (next != cursor) await _store.SetReplayCursorAsync(next);
 
-        var result = new ReplayResult(cursor, next, orders.Count, sent, failed, DatasetFinished: false);
+        var result = new ReplayResult(cursor, next, orders.Count, sent, failed, DatasetFinished: false, _retries);
         context.Logger.LogInformation($"Replay {result}");
         return result;
     }
 
+    // API Gateway allows 10 requests/s per route (burst 20); this loop sends ~8/s on average with peaks above 10.
+    // 429 (throttled) and 502/503/504 (Lambda busy / cold) are temporary → wait and send the SAME webhook again
+    // (safe: same payload = same eventId, so a retry can never be applied twice). Other errors are not retried.
+    private const int MaxAttempts = 5;
+    private int _retries;
+
     private async Task<bool> PostAsync(string carrier, string json, ILambdaContext context)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_apiBaseUrl}/carriers/{carrier}/webhook")
+        for (var attempt = 1; ; attempt++)
         {
-            Content = new StringContent(json, Encoding.UTF8, new MediaTypeHeaderValue("application/json"))
-        };
-        request.Headers.Add("X-Webhook-Secret", _secret);
-        try
-        {
-            using var response = await Http.SendAsync(request);
-            if (response.IsSuccessStatusCode) return true;
-            context.Logger.LogWarning($"{carrier} webhook → {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
-            return false;
-        }
-        catch (Exception ex)
-        {
-            context.Logger.LogWarning($"{carrier} webhook failed: {ex.Message}");
-            return false;
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_apiBaseUrl}/carriers/{carrier}/webhook")
+            {
+                Content = new StringContent(json, Encoding.UTF8, new MediaTypeHeaderValue("application/json"))
+            };
+            request.Headers.Add("X-Webhook-Secret", _secret);
+            try
+            {
+                using var response = await Http.SendAsync(request);
+                if (response.IsSuccessStatusCode) return true;
+
+                var code = (int)response.StatusCode;
+                if (code is 429 or 502 or 503 or 504 && attempt < MaxAttempts)
+                {
+                    _retries++;
+                    await Task.Delay(Backoff(attempt, response.Headers.RetryAfter?.Delta));
+                    continue;
+                }
+                context.Logger.LogWarning($"{carrier} webhook → {code} after {attempt} attempt(s): {await response.Content.ReadAsStringAsync()}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                context.Logger.LogWarning($"{carrier} webhook failed: {ex.Message}");
+                return false;
+            }
         }
     }
+
+    /// <summary>Retry-After if the server sent one, else 200, 400, 800, 1600 ms (+ up to 100 ms jitter).</summary>
+    internal static TimeSpan Backoff(int attempt, TimeSpan? retryAfter) =>
+        retryAfter is { } ra && ra > TimeSpan.Zero
+            ? ra
+            : TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt - 1) + Random.Shared.Next(0, 100));
 
     private static string Env(string name) => Environment.GetEnvironmentVariable(name)
         ?? throw new InvalidOperationException($"Missing environment variable {name}");

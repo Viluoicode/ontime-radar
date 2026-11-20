@@ -51,7 +51,11 @@ $today = [DateTime]::UtcNow.Date
 
 function Send($carrier, $payload) {
     $json = $payload | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Post "$api/carriers/$carrier/webhook" -Headers $headers -ContentType "application/json" -Body $json | Out-Null
+    # API Gateway allows 10 requests/s per route (burst 20): on 429 wait and resend (same payload = same eventId).
+    for ($try = 1; ; $try++) {
+        try { Invoke-RestMethod -Method Post "$api/carriers/$carrier/webhook" -Headers $headers -ContentType "application/json" -Body $json | Out-Null; return }
+        catch { if ($try -ge 5 -or [int]$_.Exception.Response.StatusCode -ne 429) { throw }; Start-Sleep -Milliseconds (200 * [math]::Pow(2, $try - 1)) }
+    }
 }
 $inv = [Globalization.CultureInfo]::InvariantCulture
 function Iso($d)   { $d.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", $inv) }
