@@ -12,7 +12,8 @@ namespace ShipmentSla.Infrastructure;
 
 public sealed record TimelineEntry(
     string EventId, ShipmentStatus Status, string RawStatus, DateTimeOffset OccurredAt,
-    DateTimeOffset ReceivedAt, EventOutcome Outcome, string Reason, string? Location);
+    DateTimeOffset ReceivedAt, EventOutcome Outcome, string Reason, string? Location,
+    DateTimeOffset? ProcessedAt = null);   // when the Processor stored it → ProcessedAt − ReceivedAt = pipeline latency
 
 public sealed record ShipmentTimeline(ShipmentState State, IReadOnlyList<TimelineEntry> Events);
 
@@ -209,5 +210,6 @@ public sealed class ShipmentStore(IAmazonDynamoDB ddb, string tableName)
         ReceivedAt: ParseIso(i["receivedAt"].S),
         Outcome: Enum.Parse<EventOutcome>(i["outcome"].S),
         Reason: i["reason"].S,
-        Location: Opt(i, "location"));
+        Location: Opt(i, "location"),
+        ProcessedAt: Opt(i, "processedAt") is { } processed ? ParseIso(processed) : null);
 }
