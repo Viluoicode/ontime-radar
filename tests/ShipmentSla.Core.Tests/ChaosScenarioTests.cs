@@ -166,6 +166,28 @@ public class ChaosScenarioTests
         Assert.All(scenario.Webhooks, w => Assert.Equal(w.Step == 0, Parse(w).EstimatedDelivery is not null));
     }
 
+    [Fact]
+    public void No_late_deliveries_turns_every_late_shipment_into_an_on_time_one()
+    {
+        var normal = Generate();
+        var noLate = Generate(new ChaosOptions { NoLateDeliveries = true });
+
+        Assert.Contains(normal.Shipments, s => s.Kind == LifecycleKind.Late);
+        Assert.DoesNotContain(noLate.Shipments, s => s.Kind == LifecycleKind.Late);
+        Assert.All(noLate.Shipments.Where(s => s.Expected.DeliveredAt is not null), s => Assert.False(s.Expected.IsLate));
+    }
+
+    [Theory]
+    [InlineData(2500)]
+    [InlineData(500)]
+    public void Shipments_for_a_webhook_target_lands_close_to_it(int target)
+    {
+        var options = new ChaosOptions { Seed = 1123, NoLateDeliveries = true };
+        var shipments = ChaosScenario.ShipmentsFor(target, options, Now);
+        var sent = ChaosScenario.Generate(options with { Shipments = shipments }, Now).Webhooks.Count;
+        Assert.InRange(sent, target * 0.95, target * 1.05);
+    }
+
     [Theory]
     [InlineData(0, 5, 10, 1, "x")]
     [InlineData(10, 0, 10, 1, "x")]

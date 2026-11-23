@@ -60,25 +60,20 @@ public class ChaosIngestionTests
         return (store, refused);
     }
 
-    /// <summary>Every difference between the store and the ground truth (empty list = reconciled).</summary>
-    private static async Task<List<string>> Mismatches(ShipmentStore store, ChaosScenario scenario)
+    /// <summary>
+    /// Every difference between the store and the ground truth (empty = reconciled), with the SAME comparison
+    /// the chaos runner uses against AWS. Also checks that every history item carries its processing time.
+    /// </summary>
+    private static async Task<IReadOnlyList<ChaosMismatch>> Mismatches(ShipmentStore store, ChaosScenario scenario)
     {
-        var problems = new List<string>();
+        var observed = new Dictionary<string, ChaosObservation>();
         foreach (var s in scenario.Shipments)
         {
             var timeline = await store.GetTimelineAsync(s.ShipmentId);
-            if (timeline is null)
-            {
-                problems.Add($"{s.ShipmentId}: not in the store");
-                continue;
-            }
-            var actual = new ChaosExpectation(timeline.State.Status, timeline.State.DeliveredAt, timeline.State.IsLate);
-            if (actual != s.Expected)
-                problems.Add($"{s.ShipmentId} ({s.Kind}): expected {s.Expected}, got {actual}");
-            if (timeline.Events.Count != s.Order.Events.Count)
-                problems.Add($"{s.ShipmentId}: {timeline.Events.Count} history items, expected {s.Order.Events.Count}");
+            observed[s.ShipmentId] = new ChaosObservation(timeline?.State, timeline?.Events.Count ?? 0);
+            Assert.All(timeline?.Events ?? [], e => Assert.True(e.ProcessedAt >= e.ReceivedAt, $"processedAt {e.ProcessedAt}"));
         }
-        return problems;
+        return ChaosReconciler.Compare(scenario, observed);
     }
 
     [Fact] // C1

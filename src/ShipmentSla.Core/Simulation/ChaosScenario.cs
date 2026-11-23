@@ -16,6 +16,7 @@ public sealed record ChaosOptions
     public double LatePercent { get; init; } = 10;      // % of events held back and sent after everything else
     public double MalformedPercent { get; init; } = 1;  // extra broken webhooks, as % of the valid ones
     public bool EstimateFirstOnly { get; init; }        // only the first event carries the promised date (gap R2)
+    public bool NoLateDeliveries { get; init; }         // every delivery on time → the late-delivery alarm cannot fire (runs on prod)
     public int Seed { get; init; } = 1;                 // content: shipments, timestamps, copies, defects
     public int? ArrivalSeed { get; init; }              // arrival order only (null = derived from Seed)
     public string RunId { get; init; } = "0";           // part of every tracking code → runs never collide
@@ -72,6 +73,17 @@ public sealed record ChaosScenario(
 
     public int MalformedWebhooks => Webhooks.Count(w => w.Kind == WebhookKind.Malformed);
 
+    /// <summary>
+    /// Number of shipments that gives about <paramref name="targetWebhooks"/> requests with these options
+    /// (measured on a 200-shipment sample with the same seed: the first N shipments are identical).
+    /// </summary>
+    public static int ShipmentsFor(int targetWebhooks, ChaosOptions options, DateTimeOffset now)
+    {
+        const int sample = 200;
+        var perShipment = (double)Generate(options with { Shipments = sample }, now).Webhooks.Count / sample;
+        return Math.Clamp((int)Math.Round(targetWebhooks / perShipment), 1, MaxShipments);
+    }
+
     /// <param name="now">Every event happens before this moment (lifecycles end 3–14 days ago).</param>
     public static ChaosScenario Generate(ChaosOptions options, DateTimeOffset now)
     {
@@ -86,7 +98,7 @@ public sealed record ChaosScenario(
         var heldBack = new List<ChaosWebhook>();
         for (var i = 0; i < options.Shipments; i++)
         {
-            var shipment = NewShipment(i, options.RunId, content, origin);
+            var shipment = NewShipment(i, options.RunId, options.NoLateDeliveries, content, origin);
             shipments.Add(shipment);
 
             var sends = new List<ChaosWebhook>();
@@ -132,12 +144,12 @@ public sealed record ChaosScenario(
         return new ChaosScenario(options, shipments, webhooks);
     }
 
-    private static ChaosShipment NewShipment(int index, string runId, Random rng, DateTimeOffset origin)
+    private static ChaosShipment NewShipment(int index, string runId, bool noLate, Random rng, DateTimeOffset origin)
     {
         var carrier = Carriers[rng.Next(Carriers.Count)];
         var roll = rng.Next(100);
         var kind = roll < 55 ? LifecycleKind.OnTime
-                 : roll < 75 ? LifecycleKind.Late
+                 : roll < 75 ? (noLate ? LifecycleKind.OnTime : LifecycleKind.Late)
                  : roll < 83 ? LifecycleKind.Returned
                  : roll < 90 ? LifecycleKind.Cancelled
                  : LifecycleKind.InProgress;
