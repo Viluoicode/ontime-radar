@@ -121,6 +121,9 @@ CREATED → CANCELLED
 
 ## 8. Hạn chế đã biết
 
+Giới hạn của **luật trạng thái** (R1 – hai sự kiện cùng thời điểm, R2 – ngày hẹn chỉ nằm ở sự kiện đến muộn):
+xem [README – 7b. Giới hạn đã biết](../README.md#7b-giới-hạn-đã-biết). Bảng dưới là hạn chế về dữ liệu và vận hành.
+
 | Hạn chế | Ảnh hưởng | Hướng xử lý |
 | --- | --- | --- |
 | Hãng vận chuyển, mã vận đơn, mốc *Đang vận chuyển / Đang giao / Giao thất bại* là **giả lập** | Tỉ lệ giao thất bại không phản ánh hãng thật | Kết nối API/webhook thật của hãng |

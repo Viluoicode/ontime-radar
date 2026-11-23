@@ -389,6 +389,21 @@ Hoặc xem tay:
 | **Permissions boundary** cho mọi role của stack | Role deploy chỉ được tạo/sửa role **có gắn boundary** → kể cả token GitHub bị lộ cũng không tạo được role admin cho Lambda. Boundary nằm ở stack `infra/` (stack ứng dụng không tự nới được), có Deny tường minh việc gỡ / sửa boundary |
 | **Deploy qua GitHub Actions + OIDC, có bước duyệt** | Không có access key dài hạn để lộ; role chỉ tin đúng repo + environment `production`; stack quyền tách riêng nên deploy lỗi không tự xoá quyền deploy |
 
+## 7b. Giới hạn đã biết
+
+Những chỗ state machine **chưa** xử lý đúng, đã biết và chấp nhận ở thời điểm hiện tại. Mỗi mục có test `Known_gap_…`
+ghi lại đúng hành vi hiện nay – sửa luật thì test đó phải đổi theo. Hạn chế về dữ liệu và vận hành: xem
+[docs/product.md §8](docs/product.md#8-hạn-chế-đã-biết).
+
+| # | Giới hạn | Khi nào xảy ra | Ảnh hưởng hiện tại | Hướng sửa |
+| --- | --- | --- | --- | --- |
+| **R1** | **Hai sự kiện cùng thời điểm → kết quả phụ thuộc thứ tự đến.** Luật "sự kiện cũ" dùng so sánh `<` chặt, nên 2 sự kiện cùng `occurredAt` (vd. *Đang giao* và *Giao thất bại* cùng giây) đều được áp dụng, cái nào **đến sau** thắng | Hãng quét 2 trạng thái trong cùng 1 giây / gửi thời gian làm tròn tới phút | **0 đơn**: dữ liệu Olist được `prepare_olist.py` giữ thời gian tăng chặt trong mỗi đơn; bộ sinh chaos cũng không tạo trùng thời điểm | Khi trùng thời điểm, phân xử theo thứ tự cố định (rank trạng thái, rồi mã gốc) thay vì thứ tự đến |
+| **R2** | **Ngày hẹn giao chỉ nằm ở sự kiện đến muộn → mất ngày hẹn.** Thông tin như ngày hẹn chỉ được đọc từ sự kiện *được áp dụng*; sự kiện đến muộn bị đánh `Stale` nên bị bỏ qua → `isLate` = null → đơn **không được tính** vào tỉ lệ đúng hạn | Hãng chỉ gửi ngày hẹn ở sự kiện đầu (*Tạo đơn*) **và** sự kiện đó đến sau một sự kiện mới hơn | **0 đơn**: Replayer (`CarrierSimulator`) gửi ngày hẹn ở **mọi** webhook; `demo.ps1` gửi sự kiện có ngày hẹn trước tiên | Sự kiện `Stale` vẫn được bổ sung các trường đang trống (ngày hẹn, bang, mã đơn) mà không đổi trạng thái – vẫn qua kiểm tra `version` |
+
+Test: `Known_gap_equal_timestamps_make_the_result_depend_on_arrival_order` (R1) và
+`Known_gap_promise_sent_only_on_an_event_that_arrives_late_is_lost` (R2) trong
+`tests/ShipmentSla.Core.Tests/StatusRulesTests.cs`.
+
 ## 8. Chi phí & dọn dẹp
 
 Ước tính với lịch 15 phút: **khoảng 3–5 USD/tháng** (DynamoDB write chiếm nhiều nhất).
