@@ -50,8 +50,30 @@ public static class TrackingCodes
 }
 
 /// <summary>Small helpers so each adapter stays short and gives clear 400 messages.</summary>
+/// <remarks>
+/// JsonElement.TryGetProperty / TryGetInt32 THROW InvalidOperationException on the wrong ValueKind
+/// (array body, number sent as a string) instead of returning false. The API turns only
+/// CarrierPayloadException / JsonException into 400, so every kind check happens here first.
+/// </remarks>
 internal static class Json
 {
+    /// <summary>Call first in every adapter: the body must be a JSON object (not an array, string, null...).</summary>
+    public static void RequireObject(JsonElement e)
+    {
+        if (e.ValueKind != JsonValueKind.Object)
+            throw new CarrierPayloadException($"payload must be a JSON object, got {e.ValueKind}");
+    }
+
+    public static int RequiredInt32(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)
+            ? n
+            : throw new CarrierPayloadException($"missing integer field '{name}'");
+
+    public static long RequiredInt64(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n)
+            ? n
+            : throw new CarrierPayloadException($"missing integer field '{name}'");
+
     /// <summary>Required tracking code: 1–64 chars of A-Z a-z 0-9 . _ - (rejects '#', '/', spaces, unicode...).</summary>
     public static string RequiredTrackingCode(JsonElement e, string name)
     {
@@ -111,6 +133,7 @@ public sealed class GhnAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
+        Json.RequireObject(p);
         var tracking = Json.RequiredTrackingCode(p, "order_code");
         var raw = Json.RequiredString(p, "status");
         if (!StatusMap.TryGetValue(raw, out var status))
@@ -144,9 +167,9 @@ public sealed class GhtkAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
+        Json.RequireObject(p);
         var tracking = Json.RequiredTrackingCode(p, "label_id");
-        if (!p.TryGetProperty("status_id", out var sid) || !sid.TryGetInt32(out var code))
-            throw new CarrierPayloadException("missing integer field 'status_id'");
+        var code = Json.RequiredInt32(p, "status_id");
         if (!StatusMap.TryGetValue(code, out var status))
             throw new CarrierPayloadException($"unknown GHTK status_id {code}");
         var at = Json.RequiredTimestamp(p, "action_time"); // "+07:00" → converted to UTC here
@@ -180,12 +203,12 @@ public sealed class JtAdapter : ICarrierAdapter
 
     public NormalizedEvent Parse(JsonElement p, DateTimeOffset receivedAt)
     {
+        Json.RequireObject(p);
         var tracking = Json.RequiredTrackingCode(p, "billCode");
         var raw = Json.RequiredString(p, "scanType");
         if (!StatusMap.TryGetValue(raw, out var status))
             throw new CarrierPayloadException($"unknown J&T scanType '{raw}'");
-        if (!p.TryGetProperty("scanTime", out var st) || !st.TryGetInt64(out var epochMs))
-            throw new CarrierPayloadException("missing integer field 'scanTime' (epoch ms)");
+        var epochMs = Json.RequiredInt64(p, "scanTime");   // epoch milliseconds
         var at = DateTimeOffset.FromUnixTimeMilliseconds(epochMs);
 
         return new NormalizedEvent(EventIds.Create(Code, tracking, raw, at), Code, tracking, status, raw, at, receivedAt,

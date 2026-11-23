@@ -112,6 +112,19 @@ public class CarrierAdapterTests
         Assert.Contains("A-Z a-z 0-9 . _ -", ex.Message);
     }
 
+    // Found by the chaos generator (23/11/2026): these used to throw InvalidOperationException → API 500
+    // (the carrier would retry forever) instead of CarrierPayloadException → 400.
+    [Theory]
+    [InlineData("ghn", """[{"order_code":"GHN1","status":"picked","updated_date":"2017-10-05T08:00:00Z"}]""")]
+    [InlineData("ghtk", "\"just a string\"")]
+    [InlineData("jt", "null")]
+    [InlineData("ghtk", """{"label_id":"S1","status_id":"3","action_time":"2017-10-05T15:00:00+07:00"}""")]
+    [InlineData("ghtk", """{"label_id":"S1","status_id":3.5,"action_time":"2017-10-05T15:00:00+07:00"}""")]
+    [InlineData("jt", """{"billCode":"JT1","scanType":"PICKUP","scanTime":"1507190400000"}""")]
+    [InlineData("jt", """{"billCode":"JT1","scanType":"PICKUP","scanTime":true}""")]
+    public void Wrong_json_shape_or_type_is_a_payload_error(string carrier, string json) =>
+        Assert.Throws<CarrierPayloadException>(() => Parse(carrier, json));
+
     [Fact]
     public void Tracking_code_rule_matches_spec()
     {
