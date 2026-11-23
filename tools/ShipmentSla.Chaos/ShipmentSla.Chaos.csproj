@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Chaos runner: console app that runs on YOUR machine (tools/chaos.ps1 starts it). Not deployed to AWS. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Same SDK v3.7 line as the rest of the solution. -->
+    <PackageReference Include="AWSSDK.SQS" Version="3.7.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ShipmentSla.Core\ShipmentSla.Core.csproj" />
+    <ProjectReference Include="..\..\src\ShipmentSla.Infrastructure\ShipmentSla.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>
