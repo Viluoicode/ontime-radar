@@ -526,17 +526,18 @@ giai đoạn đầu trễ ít; toàn dataset là 6,77 % (theo ngày giờ Brazil
 
 ### Bảo mật & hạ tầng (review 20/11/2026 – còn mở)
 
-Đã sửa sau review: throttling API, permissions boundary, kiểm tra mã vận đơn, payload sai kiểu trả 400 (không phải 500).
-Các mục dưới **chưa** sửa – chấp nhận cho môi trường lab, cần làm trước khi dùng thật:
+Đã sửa sau review: throttling API, permissions boundary, kiểm tra mã vận đơn, payload sai kiểu trả 400 (không phải 500);
+**S3, S4 (24/11/2026)** – xem cột "Trạng thái". Các mục còn lại **chưa** sửa – chấp nhận cho môi trường lab, cần làm
+trước khi dùng thật:
 
-| # | Giới hạn | Rủi ro | Hướng sửa |
-| --- | --- | --- | --- |
-| **S1** | **1 secret webhook dùng chung cho mọi hãng**, so sánh trực tiếp header `X-Webhook-Secret` | Lộ secret của 1 hãng = giả mạo được mọi hãng; secret đi trong mọi request, không chống gửi lại (replay) | Secret riêng mỗi hãng (SSM / Secrets Manager) + chữ ký HMAC trên body kèm timestamp |
-| **S2** | **Quyền IAM rộng hơn cần**: API có `S3CrudPolicy` trên cả bucket dữ liệu (chỉ cần đọc `events/`, ghi `athena-results/`); Processor và Replayer có `DynamoDBCrudPolicy` trên cả bảng (Replayer chỉ cần đọc / ghi 1 item `REPLAY/CURSOR`) | Lambda bị chiếm quyền có thể xoá dữ liệu nhiều hơn mức cần. Permissions boundary vẫn chặn leo quyền ra ngoài stack | Policy viết tay theo prefix S3 và theo khoá DynamoDB (`dynamodb:LeadingKeys`) |
-| **S3** | **Athena hết thời gian chờ không huỷ truy vấn** (`TimeoutException` sau khi poll, không gọi `StopQueryExecution`) | Truy vấn vẫn chạy và tính tiền sau khi API đã trả 504 (workgroup chặn ở 1 GB/truy vấn nên chi phí tối đa có giới hạn) | Gọi `StopQueryExecution` khi hết thời gian |
-| **S4** | **Không có lifecycle cho `athena-results/`** | Kết quả truy vấn tích luỹ mãi trong S3 (nhỏ nhưng tăng dần) | Rule lifecycle xoá sau vài ngày |
-| **S5** | **`localhost` nằm trong CORS và callback đăng nhập của môi trường thật** (tham số `LocalDevOrigin`) | Một trang chạy trên `localhost` của máy bất kỳ được phép gọi API / nhận mã đăng nhập (vẫn cần người dùng đăng nhập) | Stack riêng cho dev, hoặc để trống tham số ở prod |
-| **S6** | **Bật `USER_PASSWORD_AUTH`** cho app client (dùng bởi `tools/get-token.ps1`) | Mật khẩu được gửi lên Cognito (trong TLS) – với SRP mật khẩu không bao giờ rời máy; flow này cũng mở cho chính client của website dù website không cần | Script dùng SRP, hoặc client riêng cho script, tắt flow này ở client của website |
+| # | Giới hạn | Rủi ro | Hướng sửa | Trạng thái |
+| --- | --- | --- | --- | --- |
+| **S1** | **1 secret webhook dùng chung cho mọi hãng**, so sánh trực tiếp header `X-Webhook-Secret` | Lộ secret của 1 hãng = giả mạo được mọi hãng; secret đi trong mọi request, không chống gửi lại (replay) | Secret riêng mỗi hãng (SSM / Secrets Manager) + chữ ký HMAC trên body kèm timestamp | Mở |
+| **S2** | **Quyền IAM rộng hơn cần**: API có `S3CrudPolicy` trên cả bucket dữ liệu (chỉ cần đọc `events/`, ghi `athena-results/`); Processor và Replayer có `DynamoDBCrudPolicy` trên cả bảng (Replayer chỉ cần đọc / ghi 1 item `REPLAY/CURSOR`) | Lambda bị chiếm quyền có thể xoá dữ liệu nhiều hơn mức cần. Permissions boundary vẫn chặn leo quyền ra ngoài stack | Policy viết tay theo prefix S3 và theo khoá DynamoDB (`dynamodb:LeadingKeys`) | Mở |
+| **S3** | **Athena hết thời gian chờ không huỷ truy vấn** (`TimeoutException` sau khi poll, không gọi `StopQueryExecution`) | Truy vấn vẫn chạy và tính tiền sau khi API đã trả 504 (workgroup chặn ở 1 GB/truy vấn nên chi phí tối đa có giới hạn) | Gọi `StopQueryExecution` khi hết thời gian | ✅ **Đã sửa 24/11**: hết thời gian chờ **hoặc request bị huỷ** → `StopQueryExecution` (lỗi khi dừng chỉ ghi log); test `LakeQueryServiceTests` |
+| **S4** | **Không có lifecycle cho `athena-results/`** | Kết quả truy vấn tích luỹ mãi trong S3 (nhỏ nhưng tăng dần) | Rule lifecycle xoá sau vài ngày | ✅ **Đã sửa 24/11**: lifecycle xoá `athena-results/` sau 7 ngày (kết quả chỉ được dùng lại 15 phút); `events/`, `dataset/` không bị đụng |
+| **S5** | **`localhost` nằm trong CORS và callback đăng nhập của môi trường thật** (tham số `LocalDevOrigin`) | Một trang chạy trên `localhost` của máy bất kỳ được phép gọi API / nhận mã đăng nhập (vẫn cần người dùng đăng nhập) | Stack riêng cho dev, hoặc để trống tham số ở prod | **Chấp nhận có lý do** (24/11): chỉ 1 stack, website chạy ở máy cần cho sửa giao diện / quay video; vẫn phải đăng nhập Cognito (code + PKCE). Bỏ khi dọn hạ tầng sau khi chấm |
+| **S6** | **Bật `USER_PASSWORD_AUTH`** cho app client (dùng bởi `tools/get-token.ps1`) | Mật khẩu được gửi lên Cognito (trong TLS) – với SRP mật khẩu không bao giờ rời máy; flow này cũng mở cho chính client của website dù website không cần | Script dùng SRP, hoặc client riêng cho script, tắt flow này ở client của website | Mở |
 
 Lưu ý: dữ liệu chaos test (`tools/chaos.ps1`, mã vận đơn `DEMOCX…`) được ghi vào bảng thật và ở lại mãi (bảng không
 có TTL); báo cáo SLA đã loại mã `DEMO…`, nhưng metric `Deliveries` của CloudWatch vẫn cộng thêm đơn giao của lượt chaos.

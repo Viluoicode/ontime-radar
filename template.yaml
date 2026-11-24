@@ -190,6 +190,14 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      # Athena writes every query result here. Results are reused for 15 minutes at most (LakeQueryService),
+      # so older files are only clutter – delete them after 7 days. events/ and dataset/ are NOT affected.
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAthenaResults
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 7
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -244,7 +252,8 @@ Resources:
         - S3CrudPolicy: { BucketName: !Ref DataBucket }   # read the lake + write Athena results (athena-results/)
         - Statement:
             - Effect: Allow
-              Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults]
+              Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults,
+                       athena:StopQueryExecution]   # stop a query nobody waits for any more (timeout / cancelled request)
               Resource: !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}"
             - Effect: Allow
               Action: [glue:GetDatabase, glue:GetTable, glue:GetPartitions]

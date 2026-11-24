@@ -122,7 +122,7 @@ CREATED → CANCELLED
 ## 8. Hạn chế đã biết
 
 Giới hạn của **luật trạng thái** (R1, R2), **ý nghĩa thống kê của dữ liệu giả lập** (D1–D3: so sánh giữa các hãng,
-giao thất bại ↔ trễ, lệch múi giờ) và các điểm **bảo mật còn mở** (S1–S6): xem
+giao thất bại ↔ trễ, lệch múi giờ) và các điểm **bảo mật** từ review (S1–S6; S3, S4 đã sửa 24/11): xem
 [README – 7b. Giới hạn đã biết](../README.md#7b-giới-hạn-đã-biết). Bảng dưới là hạn chế về dữ liệu và vận hành.
 
 | Hạn chế | Ảnh hưởng | Hướng xử lý |

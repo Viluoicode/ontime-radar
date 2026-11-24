@@ -23,10 +23,15 @@ public sealed record ShipmentRow(
 //     result without scanning S3 again (cheaper, usually faster).
 // The SQL contains the date window, so a new day automatically means a new cache key.
 public sealed class LakeQueryService(
-    IAmazonAthena athena, string database, string workGroup, IMemoryCache cache, ILogger<LakeQueryService> log)
+    IAmazonAthena athena, string database, string workGroup, IMemoryCache cache, ILogger<LakeQueryService> log,
+    TimeSpan? queryTimeout = null)
 {
     public static readonly TimeSpan MemoryTtl = TimeSpan.FromMinutes(5);
     public const int AthenaReuseMinutes = 15;
+
+    /// <summary>API Gateway HTTP API cuts requests at 30 s, so we give up a bit earlier.</summary>
+    public static readonly TimeSpan DefaultQueryTimeout = TimeSpan.FromSeconds(25);
+    private readonly TimeSpan _queryTimeout = queryTimeout ?? DefaultQueryTimeout;
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -86,22 +91,31 @@ public sealed class LakeQueryService(
         }, ct);
         var id = start.QueryExecutionId;
 
-        // Poll (API Gateway HTTP API limit is 30 s, so we give up after ~25 s).
-        var deadline = DateTime.UtcNow.AddSeconds(25);
+        // Poll until done, or give up after the timeout (API Gateway would cut the request anyway).
+        var deadline = DateTime.UtcNow + _queryTimeout;
         bool reused;
-        while (true)
+        try
         {
-            var q = await athena.GetQueryExecutionAsync(new GetQueryExecutionRequest { QueryExecutionId = id }, ct);
-            var state = q.QueryExecution.Status.State;
-            if (state == QueryExecutionState.SUCCEEDED)
+            while (true)
             {
-                reused = q.QueryExecution.Statistics?.ResultReuseInformation?.ReusedPreviousResult == true;
-                break;
+                var q = await athena.GetQueryExecutionAsync(new GetQueryExecutionRequest { QueryExecutionId = id }, ct);
+                var state = q.QueryExecution.Status.State;
+                if (state == QueryExecutionState.SUCCEEDED)
+                {
+                    reused = q.QueryExecution.Statistics?.ResultReuseInformation?.ReusedPreviousResult == true;
+                    break;
+                }
+                if (state == QueryExecutionState.FAILED || state == QueryExecutionState.CANCELLED)
+                    throw new InvalidOperationException($"Athena query {state}: {q.QueryExecution.Status.StateChangeReason}");
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("Athena query timed out");
+                await Task.Delay(300, ct);
             }
-            if (state == QueryExecutionState.FAILED || state == QueryExecutionState.CANCELLED)
-                throw new InvalidOperationException($"Athena query {state}: {q.QueryExecution.Status.StateChangeReason}");
-            if (DateTime.UtcNow > deadline) throw new TimeoutException("Athena query timed out");
-            await Task.Delay(300, ct);
+        }
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+        {
+            // Nobody will read the result: stop the query so it does not keep running (and billing) in Athena.
+            await TryStopAsync(id);
+            throw;
         }
 
         // Results come in pages of up to 1000 rows; the first row of the first page is the header.
@@ -114,6 +128,21 @@ public sealed class LakeQueryService(
             next = page.NextToken;
         } while (next is not null);
         return (rows.Skip(1).ToList(), reused);
+    }
+
+    /// <summary>Best effort: a failed stop is only logged – the caller still gets the original timeout / cancellation.</summary>
+    private async Task TryStopAsync(string id)
+    {
+        try
+        {
+            // Not the request's token: it may be the very thing that was cancelled.
+            await athena.StopQueryExecutionAsync(new StopQueryExecutionRequest { QueryExecutionId = id }, CancellationToken.None);
+            log.LogWarning("Lake query {Id} stopped after timeout / cancellation", id);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Could not stop lake query {Id}", id);
+        }
     }
 
     private static string? Text(string? s) => string.IsNullOrEmpty(s) ? null : s;
