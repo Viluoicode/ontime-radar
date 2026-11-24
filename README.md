@@ -368,6 +368,9 @@ Hoặc xem tay:
 
 ## 7. Thiết kế đáng chú ý (để trình bày)
 
+4 quyết định lớn có ADR riêng (bối cảnh, phương án đã cân nhắc, đánh đổi, bằng chứng): [docs/adr/](docs/adr/README.md) –
+SQS FIFO theo vận đơn, DynamoDB single-table, serverless không VPC, deploy OIDC có duyệt.
+
 | Quyết định | Lý do |
 | --- | --- |
 | **SQS FIFO, MessageGroupId = vận đơn** | Sự kiện của 1 vận đơn xử lý đúng thứ tự; các vận đơn khác vẫn song song |
