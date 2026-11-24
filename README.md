@@ -67,13 +67,14 @@ Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã �
 
 | Đường dẫn | Nội dung |
 | --- | --- |
-| `src/ShipmentSla.Core` | Nghiệp vụ thuần (không phụ thuộc AWS): model, **state machine**, adapter 3 hãng, simulator |
+| `src/ShipmentSla.Core` | Nghiệp vụ thuần (không phụ thuộc AWS): model, **state machine**, adapter 3 hãng, simulator, bộ sinh + đối chiếu **chaos test** (`Simulation/`) |
 | `src/ShipmentSla.Infrastructure` | Truy cập DynamoDB (single-table, transaction, idempotency) |
 | `src/ShipmentSla.Api` | Minimal API chạy trên Lambda (webhook + tra cứu) |
 | `src/ShipmentSla.Processor` | Lambda đọc SQS FIFO → DynamoDB + S3 + CloudWatch metric |
 | `src/ShipmentSla.Replayer` | Lambda phát lại đơn Olist thành webhook |
-| `tests/ShipmentSla.Core.Tests` | xUnit: state machine, adapter, round-trip simulator |
-| `tests/ShipmentSla.Service.Tests` | Code chạm AWS với AWS **giả** (không cần tài khoản / Docker): `ShipmentStore` trên DynamoDB giả trong bộ nhớ, Processor (lỗi giữa batch FIFO), API thật trong bộ nhớ (phân quyền 401/403, webhook), luật Replayer |
+| `tests/ShipmentSla.Core.Tests` | xUnit: state machine, adapter, round-trip simulator, bộ sinh chaos + đối chiếu |
+| `tests/ShipmentSla.Service.Tests` | Code chạm AWS với AWS **giả** (không cần tài khoản / Docker): `ShipmentStore` trên DynamoDB giả trong bộ nhớ, Processor (lỗi giữa batch FIFO), API thật trong bộ nhớ (phân quyền 401/403, webhook), luật Replayer, **chaos trong bộ nhớ** (C1–C4) |
+| `tools/chaos.ps1` + `tools/ShipmentSla.Chaos` | Chaos test trên hệ thống đã deploy – xem [6b](#6b-chaos-test-webhook-lộn-xộn-có-đáp-án) (console app chạy ở máy, không deploy) |
 | `tools/prepare_olist.py` | Chuyển CSV Olist → `chunks/*.jsonl` cho Replayer |
 | `tools/sample-data/` | 6 đơn **giả lập** đúng định dạng Olist để test trước khi tải Kaggle |
 | `template.yaml` | Toàn bộ hạ tầng (AWS SAM / CloudFormation), gồm Glue database/table + Athena workgroup |
@@ -98,7 +99,7 @@ Dashboard web (S3 + CloudFront, đăng nhập Cognito). Email trên ảnh đã �
 ```powershell
 cd shipment-sla-service
 dotnet build
-dotnet test        # 182 test: Core (state machine, adapter…) + Service (DynamoDB/SQS/S3/Athena giả)
+dotnet test        # 237 test: Core (state machine, adapter, chaos…) + Service (DynamoDB/SQS/S3/Athena giả)
 ```
 
 Test ưu tiên 3 chỗ dễ mất / sai dữ liệu nhất, đều đã thử **cố ý làm hỏng code** để chắc test bắt được (mutation test):
@@ -108,10 +109,11 @@ Test ưu tiên 3 chỗ dễ mất / sai dữ liệu nhất, đều đã thử **
 | `ShipmentStore` | Transaction 2 item, `Duplicate` không ghi gì, **xung đột version không bị nhận nhầm là `Duplicate`**, phân trang lịch sử | Nhận diện trùng bằng "bất kỳ lý do nào" → S4 đỏ |
 | Processor | Lỗi giữa batch FIFO: message lỗi **và mọi message sau** báo lỗi, không được xử lý; S3/CloudWatch lỗi không làm hỏng batch | Bỏ quy tắc FIFO → 2 test đỏ |
 | Phân quyền | Ma trận 401/403 qua toàn bộ pipeline; **mọi route GET (trừ `/health`) phải có `RequireAccess`** | Bỏ filter khỏi `/sla/trend` → 2 test đỏ |
+| Webhook lộn xộn (chaos, [6b](#6b-chaos-test-webhook-lộn-xộn-có-đáp-án)) | 100 thứ tự đến khác nhau → luôn ra đúng đáp án; đi trọn API thật → message SQS → Processor thật; payload hỏng (3 hãng × 7 kiểu) → 400 | Trả adapter về bản trước 23/11 → API nhận **5 × 500** (bug F1, đã sửa) |
 
 `FakeDynamoTable` chỉ hiểu đúng các lệnh / điều kiện code đang dùng và ném `NotSupportedException` với mọi thứ khác,
-nên đổi code mà quên cập nhật bản giả sẽ lộ ngay. Phần tích hợp thật vẫn kiểm trên AWS bằng `demo.ps1` (cảnh 2)
-và `daily-check.ps1 -AuthMatrix`.
+nên đổi code mà quên cập nhật bản giả sẽ lộ ngay. Phần tích hợp thật vẫn kiểm trên AWS bằng `demo.ps1` (cảnh 2),
+`daily-check.ps1 -AuthMatrix` và `chaos.ps1` (mục 6b).
 
 ## 2. Deploy lên AWS
 
@@ -366,6 +368,63 @@ Hoặc xem tay:
 - `aws s3 ls s3://$bucket/events/` có thư mục `dt=` của hôm nay.
 - Mỗi tuần: chụp Cost Explorer (lọc theo service) → lưu vào `docs/evidence/`.
 
+## 6b. Chaos test (webhook lộn xộn có đáp án)
+
+**Câu hỏi cần trả lời:** khi hãng gửi webhook **trùng, sai thứ tự, gửi muộn và hỏng – cùng lúc, số lượng lớn, trên
+AWS thật** – trạng thái cuối của từng vận đơn có đúng không? Unit test chỉ chứng minh từng luật riêng lẻ.
+
+Cách làm – giống một bài thi có sẵn đáp án:
+
+1. **Ra đề có đáp án** (`ChaosScenario`): sinh vòng đời hợp lệ cho mỗi vận đơn (đúng hạn / hoàn / huỷ / đang giao) và
+   ghi sẵn trạng thái cuối, ngày giao, trễ hay không. Đáp án được **chọn trước**, không tính bằng code đang kiểm tra.
+2. **Làm lộn xộn**: mỗi sự kiện gửi ~ 5 bản, xáo thứ tự trong từng vận đơn, giữ ~ 10 % sự kiện gửi sau cùng, thêm ~ 1 %
+   payload hỏng (7 kiểu); cuối lượt **gửi lại 50 bản trùng sau > 5 phút** (ra khỏi cửa sổ dedup của SQS).
+3. **Chấm** (`ChaosReconciler`): đọc lại DynamoDB, so từng vận đơn với đáp án.
+
+```powershell
+.\tools\chaos.ps1 -DryRun          # xem kịch bản, không gửi gì, không cần AWS
+.\tools\chaos.ps1                  # ~2.500 webhook, seed ngẫu nhiên (in ra) → docs\evidence\chaos-<ngày_giờ>.md
+.\tools\chaos.ps1 -Seed 942783     # chạy lại đúng kịch bản đó (mã vận đơn mới)
+```
+
+Script tự đọc thông tin stack, truyền secret webhook qua biến môi trường (không in ra), **tự chờ để không trùng lượt
+Replayer** (hai bên dùng chung giới hạn 10 req/s), gửi 8 req/s, chờ hàng đợi trống rồi chấm. Một lượt ~ 7 phút, cộng
+thời gian chờ cửa sổ (tối đa ~ 11 phút). **Giữ máy thức** trong lúc chạy.
+
+**Đạt khi:** mọi webhook hợp lệ → `202`, mọi payload hỏng → `400`; **0 sai lệch** (trạng thái, ngày giao, trễ, số
+history item = số sự kiện); 50/50 bản trùng muộn → `Duplicate`; DLQ không tăng. Cùng logic này chạy trong CI
+(test C1–C4, DynamoDB giả) ở mỗi lần push.
+
+**Kết quả trên AWS** (dữ liệu **giả lập 100 %**):
+
+| Lượt | Webhook | Sự kiện | 202 / 400 | Bản trùng muộn → `Duplicate` | Sai lệch | DLQ | Trễ xử lý p50 / p95 | Kết luận |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 23/11/2026 11:42 UTC | 2.375 | 480 | 2.351 / 24 | – (chưa có đợt này) | **0** | 0 → 0 | 17 / 40 ms | ĐẠT |
+| 24/11/2026 12:12 UTC | 2.533 | 518 | 2.508 / 25 | **50 / 50** | **0** | 0 → 0 | 17 / 42 ms | ĐẠT |
+
+Đọc số liệu:
+
+- **Chống trùng 2 lớp** đều đã được thử trên AWS: bản trùng trong 5 phút bị **SQS FIFO** loại (không tới Processor);
+  bản gửi lại sau 5 phút tới Processor và bị **DynamoDB** chặn (`Duplicate`, không ghi thêm history).
+- **Sai thứ tự:** 57 % sự kiện tới sau một sự kiện mới hơn của cùng vận đơn (lượt 24/11: 294 `Stale` / 224 `Applied`)
+  – được lưu vào lịch sử nhưng **không** làm trạng thái đi lùi.
+- **Trễ xử lý** = `processedAt − receivedAt` (gồm chờ hàng đợi), đo khi hàng đợi gần trống – **không** phải hiệu năng
+  khi tải cao.
+
+Chaos test đã tìm ra lỗi thật: **F1** – body không phải JSON object, hoặc số gửi dạng chuỗi → API trả `500` thay vì
+`400` (hãng thật sẽ gửi lại mãi); đã sửa 23/11. Lượt 24/11 11:42 UTC **không đạt vì lỗi của chính công cụ** (hệ thống
+vẫn 0 sai lệch): đo thời điểm gửi lại từ bản trùng *đầu tiên* thay vì *cuối cùng*, và gửi dồn bù sau khi máy ngừng
+~ 5 phút → 429; đã sửa trước lượt 12:12.
+
+**Tác dụng phụ & giới hạn:**
+
+- Ghi vào **bảng thật**: ~ 600 item `DEMOCX…` mỗi lượt, ở lại mãi (bảng không có TTL). Báo cáo SLA đã loại mã `DEMO…`.
+- Không sinh đơn giao trễ (để không bật alarm tỉ lệ trễ); metric `Deliveries` của CloudWatch vẫn cộng thêm.
+- Chỉ sinh vòng đời hợp lệ, không trùng thời điểm → **không** kiểm R1, R2 (mục 7b). Thời điểm sự kiện do bộ sinh chọn
+  (3–14 ngày trước) nên không đo "độ trễ của hãng".
+- Thuật ngữ: đây là kiểm thử **đầu vào** lộn xộn + đối chiếu đáp án (gần property-based testing), **không** phải
+  *chaos engineering* theo nghĩa gây lỗi hạ tầng (tắt máy chủ, AWS Fault Injection Service).
+
 ## 7. Thiết kế đáng chú ý (để trình bày)
 
 4 quyết định lớn có ADR riêng (bối cảnh, phương án đã cân nhắc, đánh đổi, bằng chứng): [docs/adr/](docs/adr/README.md) –
@@ -465,6 +524,8 @@ sam delete --stack-name shipment-sla
 - [x] Deploy AWS, chạy dữ liệu Olist thật, bật lịch 15 phút, xác nhận email cảnh báo
 - [x] Script demo `tools/demo.ps1`
 - [x] Deploy tự động bằng GitHub Actions + OIDC, có bước duyệt (chạy thành công 20/11/2026)
+- [x] Chaos test webhook lộn xộn có đáp án, trên AWS: 0 sai lệch, chống trùng 2 lớp; tìm và sửa bug F1 (23–24/11/2026)
+- [x] 4 ADR (`docs/adr/`), mục "Giới hạn đã biết" (7b)
 - [ ] Sơ đồ kiến trúc PNG, evidence, video demo
 
 ## Dữ liệu
