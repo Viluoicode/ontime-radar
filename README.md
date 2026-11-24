@@ -391,9 +391,14 @@ Hoặc xem tay:
 
 ## 7b. Giới hạn đã biết
 
+Ghi rõ để người đọc không hiểu sai số liệu và biết chỗ nào chưa đạt mức production. Hạn chế vận hành khác
+(kẽ hở DynamoDB-trước-S3-sau của event lake, tài khoản chỉ 10 Lambda chạy cùng lúc, Replayer phát theo ngày đặt hàng,
+dữ liệu là bang của Brazil): xem [docs/product.md §8](docs/product.md#8-hạn-chế-đã-biết).
+
+### Luật trạng thái
+
 Những chỗ state machine **chưa** xử lý đúng, đã biết và chấp nhận ở thời điểm hiện tại. Mỗi mục có test `Known_gap_…`
-ghi lại đúng hành vi hiện nay – sửa luật thì test đó phải đổi theo. Hạn chế về dữ liệu và vận hành: xem
-[docs/product.md §8](docs/product.md#8-hạn-chế-đã-biết).
+ghi lại đúng hành vi hiện nay – sửa luật thì test đó phải đổi theo.
 
 | # | Giới hạn | Khi nào xảy ra | Ảnh hưởng hiện tại | Hướng sửa |
 | --- | --- | --- | --- | --- |
@@ -403,6 +408,37 @@ ghi lại đúng hành vi hiện nay – sửa luật thì test đó phải đ�
 Test: `Known_gap_equal_timestamps_make_the_result_depend_on_arrival_order` (R1) và
 `Known_gap_promise_sent_only_on_an_event_that_arrives_late_is_lost` (R2) trong
 `tests/ShipmentSla.Core.Tests/StatusRulesTests.cs`.
+
+### Dữ liệu: thật vs giả lập
+
+**Thật** (Olist): mã đơn, thời điểm đặt / lấy hàng / giao, ngày hẹn giao, bang người mua / người bán.
+**Giả lập**: hãng vận chuyển, mã vận đơn, mốc *Đang vận chuyển* / *Đang giao*, *Giao thất bại* (`tools/prepare_olist.py`).
+
+| # | Giới hạn | Hệ quả khi đọc số liệu |
+| --- | --- | --- |
+| **D1** | **Hãng được gán theo hash của mã đơn** (≈ 45 % GHN, 35 % GHTK, 20 % J&T), không theo hãng thật | **So sánh tỉ lệ đúng hạn giữa các hãng không có ý nghĩa thống kê** – khác biệt giữa các hãng chỉ là nhiễu ngẫu nhiên. Báo cáo theo hãng dùng để minh hoạ tính năng, không để kết luận hãng nào tốt hơn |
+| **D2** | ***Giao thất bại* chỉ được sinh trước một số đơn giao trễ** (1 ngày trước lần giao cuối) | Tương quan "từng giao thất bại ↔ giao trễ" là do cách sinh dữ liệu, **không** phải phát hiện. Tỉ lệ giao thất bại không phản ánh hãng thật |
+| **D3** | **Lệch múi giờ khi tính trễ**: so ngày giao theo **UTC** với ngày hẹn (theo giờ Brazil – São Paulo, UTC−3) → đơn giao 21:00–23:59 giờ Brazil đúng ngày hẹn bị tính trễ | Đo 20/11/2026: 2 / 7.404 đơn đã phát (0,03 điểm %); toàn dataset 280 / 96.470 đơn (7,06 % so với 6,77 %, lệch 0,29 điểm %). Dưới ngưỡng 0,5 điểm % đặt ra → **chấp nhận, chưa sửa**. Sửa: tính trễ theo múi giờ của khu vực giao |
+
+Không trích tỉ lệ trễ trên dashboard như "tỉ lệ trễ của Olist": Replayer phát theo ngày đặt hàng (2016 → 2018), đơn
+giai đoạn đầu trễ ít; toàn dataset là 6,77 % (theo ngày giờ Brazil).
+
+### Bảo mật & hạ tầng (review 20/11/2026 – còn mở)
+
+Đã sửa sau review: throttling API, permissions boundary, kiểm tra mã vận đơn, payload sai kiểu trả 400 (không phải 500).
+Các mục dưới **chưa** sửa – chấp nhận cho môi trường lab, cần làm trước khi dùng thật:
+
+| # | Giới hạn | Rủi ro | Hướng sửa |
+| --- | --- | --- | --- |
+| **S1** | **1 secret webhook dùng chung cho mọi hãng**, so sánh trực tiếp header `X-Webhook-Secret` | Lộ secret của 1 hãng = giả mạo được mọi hãng; secret đi trong mọi request, không chống gửi lại (replay) | Secret riêng mỗi hãng (SSM / Secrets Manager) + chữ ký HMAC trên body kèm timestamp |
+| **S2** | **Quyền IAM rộng hơn cần**: API có `S3CrudPolicy` trên cả bucket dữ liệu (chỉ cần đọc `events/`, ghi `athena-results/`); Processor và Replayer có `DynamoDBCrudPolicy` trên cả bảng (Replayer chỉ cần đọc / ghi 1 item `REPLAY/CURSOR`) | Lambda bị chiếm quyền có thể xoá dữ liệu nhiều hơn mức cần. Permissions boundary vẫn chặn leo quyền ra ngoài stack | Policy viết tay theo prefix S3 và theo khoá DynamoDB (`dynamodb:LeadingKeys`) |
+| **S3** | **Athena hết thời gian chờ không huỷ truy vấn** (`TimeoutException` sau khi poll, không gọi `StopQueryExecution`) | Truy vấn vẫn chạy và tính tiền sau khi API đã trả 504 (workgroup chặn ở 1 GB/truy vấn nên chi phí tối đa có giới hạn) | Gọi `StopQueryExecution` khi hết thời gian |
+| **S4** | **Không có lifecycle cho `athena-results/`** | Kết quả truy vấn tích luỹ mãi trong S3 (nhỏ nhưng tăng dần) | Rule lifecycle xoá sau vài ngày |
+| **S5** | **`localhost` nằm trong CORS và callback đăng nhập của môi trường thật** (tham số `LocalDevOrigin`) | Một trang chạy trên `localhost` của máy bất kỳ được phép gọi API / nhận mã đăng nhập (vẫn cần người dùng đăng nhập) | Stack riêng cho dev, hoặc để trống tham số ở prod |
+| **S6** | **Bật `USER_PASSWORD_AUTH`** cho app client (dùng bởi `tools/get-token.ps1`) | Mật khẩu được gửi lên Cognito (trong TLS) – với SRP mật khẩu không bao giờ rời máy; flow này cũng mở cho chính client của website dù website không cần | Script dùng SRP, hoặc client riêng cho script, tắt flow này ở client của website |
+
+Lưu ý: dữ liệu chaos test (`tools/chaos.ps1`, mã vận đơn `DEMOCX…`) được ghi vào bảng thật và ở lại mãi (bảng không
+có TTL); báo cáo SLA đã loại mã `DEMO…`, nhưng metric `Deliveries` của CloudWatch vẫn cộng thêm đơn giao của lượt chaos.
 
 ## 8. Chi phí & dọn dẹp
 
