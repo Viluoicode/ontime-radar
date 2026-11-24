@@ -88,6 +88,20 @@ public class ChaosIngestionTests
         Assert.Empty(await Mismatches(store, scenario));
     }
 
+    [Fact] // C4 – what the runner's late-duplicate phase relies on: a copy arriving after everything else is a no-op
+    public async Task Duplicates_resent_after_processing_are_Duplicate_and_change_nothing()
+    {
+        var scenario = ChaosScenario.Generate(new ChaosOptions { Shipments = 30, Seed = 9, MalformedPercent = 0 }, Now);
+        var (store, _) = await RunInMemory(scenario);
+
+        var outcomes = new List<EventOutcome>();
+        foreach (var w in scenario.Webhooks.DistinctBy(w => w.Body).Take(50))
+            outcomes.Add((await store.ProcessAsync(Ingest(w)!, Now.AddMinutes(10))).Decision.Outcome);
+
+        Assert.All(outcomes, o => Assert.Equal(EventOutcome.Duplicate, o));
+        Assert.Empty(await Mismatches(store, scenario));      // same state, still one history item per event
+    }
+
     [Fact] // C2 – property: the result does not depend on the arrival order
     public async Task Any_arrival_order_of_the_same_events_gives_the_same_final_state()
     {

@@ -4,6 +4,10 @@
 #   .\tools\chaos.ps1                  # 2.500 webhook, seed ngẫu nhiên (in ra để chạy lại y hệt)
 #   .\tools\chaos.ps1 -Seed 1123       # chạy lại đúng kịch bản đó (run id mới → mã vận đơn mới)
 #   .\tools\chaos.ps1 -DryRun          # chỉ xem kịch bản, không gửi gì, không cần AWS
+#   .\tools\chaos.ps1 -LateDuplicates 0   # bỏ đợt 3 (gửi lại bản trùng sau > 5 phút)
+#
+# Chống trùng 2 lớp: bản trùng trong 5 phút bị SQS FIFO loại; đợt 3 gửi lại 50 bản trùng sau > 5 phút để chúng
+# tới DynamoDB → phải ra Duplicate (đếm trong log Processor) và không thêm history.
 #
 # Dữ liệu GIẢ LẬP: mã vận đơn DEMOCX… (báo cáo SLA đã loại DEMO*), KHÔNG đơn nào giao trễ → alarm tỉ lệ trễ không bật.
 # Metric "Deliveries" vẫn cộng thêm các đơn đã giao của lượt chạy. Mỗi lượt để lại ~90 shipment (~600 item)
@@ -13,6 +17,7 @@
 param(
     [int]$Webhooks = 2500,
     [int]$Seed,
+    [int]$LateDuplicates = 50,
     [string]$StackName = "shipment-sla",
     [string]$Region = "ap-southeast-1",
     [switch]$DryRun,
@@ -22,7 +27,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $root = Split-Path $PSScriptRoot -Parent
 $project = Join-Path $PSScriptRoot "ShipmentSla.Chaos"
-$toolArgs = @("--webhooks", $Webhooks, "--region", $Region, "--out", (Join-Path $root "docs\evidence"))
+$toolArgs = @("--webhooks", $Webhooks, "--late-duplicates", $LateDuplicates, "--region", $Region, "--out", (Join-Path $root "docs\evidence"))
 if ($PSBoundParameters.ContainsKey("Seed")) { $toolArgs += @("--seed", $Seed) }
 if ($NoWait) { $toolArgs += "--no-wait" }
 
@@ -44,6 +49,8 @@ $toolArgs += @(
     "--queue-url", (Get-StackOutput "EventsQueueUrl"),
     "--dlq-url", (Get-StackOutput "EventsDlqUrl"))
 $fn = aws cloudformation describe-stack-resource --stack-name $StackName --logical-resource-id ApiFunction --query StackResourceDetail.PhysicalResourceId --output text
+$processor = aws cloudformation describe-stack-resource --stack-name $StackName --logical-resource-id ProcessorFunction --query StackResourceDetail.PhysicalResourceId --output text
+$toolArgs += @("--processor-log-group", "/aws/lambda/$processor")
 
 try {
     $env:CHAOS_WEBHOOK_SECRET = aws lambda get-function-configuration --function-name $fn --query Environment.Variables.WEBHOOK_SECRET --output text

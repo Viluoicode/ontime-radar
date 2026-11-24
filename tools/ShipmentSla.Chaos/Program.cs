@@ -11,6 +11,8 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Amazon;
+using Amazon.CloudWatchLogs;
+using Amazon.CloudWatchLogs.Model;
 using Amazon.DynamoDBv2;
 using Amazon.SQS;
 using Amazon.SQS.Model;
@@ -25,7 +27,7 @@ var inv = CultureInfo.InvariantCulture;
 var now = DateTimeOffset.UtcNow;
 Args a;
 ChaosOptions options;
-int targetWebhooks, concurrency, replayerMinute;
+int targetWebhooks, concurrency, replayerMinute, lateDuplicates;
 double rate;
 try
 {
@@ -43,6 +45,7 @@ try
     rate = a.Double("rate", 8);                                 // requests/s; the API allows 10 (burst 20) per route
     concurrency = a.Int("concurrency", 4);
     replayerMinute = a.Int("replayer-minute", 10);
+    lateDuplicates = a.Int("late-duplicates", 50);              // resent > 5 min later → must reach DynamoDB
 }
 catch (ArgumentException ex) { return Usage(ex.Message); }
 
@@ -51,9 +54,17 @@ if (targetWebhooks < 1) return Usage("webhooks must be ≥ 1");
 if (rate is <= 0 or > 10) return Usage("rate must be > 0 and ≤ 10 (API Gateway throttles at 10 req/s)");
 if (concurrency is < 1 or > 10) return Usage("concurrency must be 1-10 (the account runs at most 10 Lambdas at once)");
 if (replayerMinute is < 0 or > 14) return Usage("replayer-minute must be 0-14");
+if (lateDuplicates is < 0 or > 500) return Usage("late-duplicates must be 0-500");
 options = options with { Shipments = ChaosScenario.ShipmentsFor(targetWebhooks, options, now) };
 var scenario = ChaosScenario.Generate(options, now);
-var estimate = TimeSpan.FromSeconds(scenario.Webhooks.Count / rate * 1.15);   // +15 % for 429 retries
+lateDuplicates = Math.Min(lateDuplicates, scenario.UniqueEvents);
+var sendEstimate = TimeSpan.FromSeconds(scenario.Webhooks.Count / rate * 1.15);   // +15 % for 429 retries
+// Late duplicates go out once the earliest events are > 5 min 30 s old (≈ right after the main send), + their own time.
+var estimate = lateDuplicates == 0
+    ? sendEstimate
+    : (sendEstimate > ChaosSchedule.SqsDedupWindow + ChaosSchedule.DedupMargin
+        ? sendEstimate : ChaosSchedule.SqsDedupWindow + ChaosSchedule.DedupMargin)
+      + TimeSpan.FromSeconds(30 + lateDuplicates / rate * 1.15);                  // + drain wait
 
 var valid = scenario.Webhooks.Count(w => w.Kind == WebhookKind.Valid);
 var heldBackEvents = scenario.Webhooks.Where(w => w.HeldBack).Select(w => (w.ShipmentId, w.Step)).Distinct().Count();
@@ -63,6 +74,7 @@ var kinds = scenario.Shipments.GroupBy(s => s.Kind).OrderBy(g => g.Key)
 Console.WriteLine($"Chaos run {options.RunId} · seed {options.Seed} · DỮ LIỆU GIẢ LẬP (mã vận đơn {ChaosScenario.TrackingPrefix}{options.RunId}…)");
 Console.WriteLine($"  {scenario.Shipments.Count} shipment ({string.Join(", ", kinds)}) · {scenario.UniqueEvents} event khác nhau");
 Console.WriteLine($"  {scenario.Webhooks.Count} webhook = {valid} hợp lệ (~{(double)valid / scenario.UniqueEvents:0.0} bản/event) + {scenario.MalformedWebhooks} hỏng · {heldBackEvents} event gửi trễ");
+Console.WriteLine($"  + {lateDuplicates} bản trùng gửi lại sau > 5 phút (phải tới DynamoDB → Duplicate)");
 Console.WriteLine($"  Tốc độ {rate:0.#} req/s, {concurrency} luồng → ước tính {estimate:mm\\:ss}");
 
 if (a.Flag("dry-run"))
@@ -71,13 +83,14 @@ if (a.Flag("dry-run"))
     return 0;
 }
 
-string api, table, queueUrl, dlqUrl;
+string api, table, queueUrl, dlqUrl, processorLogGroup = "";
 try
 {
     api = a.Required("api").TrimEnd('/');
     table = a.Required("table");
     queueUrl = a.Required("queue-url");
     dlqUrl = a.Required("dlq-url");
+    if (lateDuplicates > 0) processorLogGroup = a.Required("processor-log-group");   // to count Duplicate outcomes
 }
 catch (ArgumentException ex) { return Usage(ex.Message); }
 var secret = Environment.GetEnvironmentVariable("CHAOS_WEBHOOK_SECRET");
@@ -105,6 +118,9 @@ var dlqBefore = await QueueDepth(sqs, dlqUrl);
 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 var codes = new ConcurrentDictionary<int, int>();          // final status per webhook (0 = network error)
 var unexpected = new ConcurrentQueue<string>();
+var lastAccepted = new ConcurrentDictionary<string, DateTimeOffset>();    // body → when its LAST copy got 202
+var paceShift = TimeSpan.Zero;                                            // schedule moved forward after stalls
+var stalls = 0;
 var retries = 0;
 var dispatched = 0;
 var sendStarted = DateTimeOffset.UtcNow;
@@ -119,6 +135,37 @@ Console.WriteLine($"  Đã gửi {dispatched} webhook trong {sendTime:mm\\:ss} (
 // ---------------- 4) Wait until the Processor has drained the queue ----------------
 Console.WriteLine("  Chờ hàng đợi trống…");
 var drained = await WaitForEmptyQueue(sqs, queueUrl, TimeSpan.FromMinutes(10));
+
+// ---------------- 4b) Late duplicates: outside the SQS dedup window → only DynamoDB can stop them ----------------
+// Same body = same eventId. Resent > 5 min 30 s after its first copy was accepted, SQS no longer drops it, so the
+// Processor must answer Duplicate (history item already exists) and write nothing.
+int lateSent = 0, late202 = 0;
+int? lateDuplicateOutcomes = null;
+if (lateDuplicates > 0 && drained)
+{
+    var (bodies, notBefore) = ChaosSchedule.PickLateDuplicates(lastAccepted, lateDuplicates);
+    var byBody = scenario.Webhooks.Where(w => w.Kind == WebhookKind.Valid)
+        .GroupBy(w => w.Body).ToDictionary(g => g.Key, g => g.First());
+    if (notBefore - DateTimeOffset.UtcNow is var wait && wait > TimeSpan.Zero)
+    {
+        Console.WriteLine($"  Chờ tới {notBefore:HH:mm:ss} UTC để {bodies.Count} bản trùng ra khỏi cửa sổ dedup 5 phút của SQS…");
+        await Task.Delay(wait);
+    }
+    var lateStarted = DateTimeOffset.UtcNow;
+    foreach (var body in bodies)
+    {
+        var code = await Post(byBody[body]);
+        lateSent++;
+        if (code == 202) late202++;
+        else unexpected.Enqueue($"bản trùng gửi lại {byBody[body].ShipmentId} → {code} (cần 202)");
+        await Task.Delay(TimeSpan.FromSeconds(1 / rate));
+    }
+    Console.WriteLine($"  Đã gửi lại {lateSent} bản trùng ({late202} × 202). Chờ xử lý + đếm Duplicate trong log Processor…");
+    drained = await WaitForEmptyQueue(sqs, queueUrl, TimeSpan.FromMinutes(5));
+    using var logs = new AmazonCloudWatchLogsClient(region);
+    lateDuplicateOutcomes = await CountLogMatches(logs, processorLogGroup,
+        $"{ChaosScenario.TrackingPrefix}{options.RunId} Duplicate", lateStarted, expected: lateSent);
+}
 var dlqAfter = await QueueDepth(sqs, dlqUrl);
 
 // ---------------- 5) Reconcile with the ground truth ----------------
@@ -141,7 +188,8 @@ var outcomes = history.GroupBy(e => e.Outcome).OrderBy(g => g.Key).Select(g => $
 int Code(int c) => codes.GetValueOrDefault(c);
 var otherCodes = codes.Where(kv => kv.Key is not (202 or 400)).OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}").ToList();
 
-var passed = drained && mismatches.Count == 0 && unexpected.IsEmpty && dlqAfter <= dlqBefore;
+var lateOk = lateDuplicates == 0 || (lateSent == lateDuplicates && late202 == lateSent && lateDuplicateOutcomes == lateSent);
+var passed = drained && mismatches.Count == 0 && unexpected.IsEmpty && dlqAfter <= dlqBefore && lateOk;
 
 // ---------------- 6) Report ----------------
 string Ms(double? v) => v is null ? "–" : v.Value.ToString("N0", inv);
@@ -161,7 +209,7 @@ md.AppendLine($"| Shipment | {scenario.Shipments.Count} ({string.Join(", ", kind
 md.AppendLine($"| Event khác nhau | {scenario.UniqueEvents} |");
 md.AppendLine($"| Webhook gửi | {scenario.Webhooks.Count} = {valid} hợp lệ (trùng ~{(double)valid / scenario.UniqueEvents:0.0} bản/event) + {scenario.MalformedWebhooks} hỏng |");
 md.AppendLine($"| Thứ tự | xáo trong từng shipment; {heldBackEvents} event giữ lại gửi sau cùng |");
-md.AppendLine($"| Tốc độ | {rate:0.#} req/s, {concurrency} luồng; gửi xong trong {sendTime:mm\\:ss} |");
+md.AppendLine($"| Tốc độ | {rate:0.#} req/s, {concurrency} luồng; gửi xong trong {sendTime:mm\\:ss}; dời lịch {stalls} lần (tổng {paceShift.TotalSeconds:0} s) |");
 md.AppendLine();
 md.AppendLine("## Kết quả");
 md.AppendLine();
@@ -172,6 +220,11 @@ md.AppendLine($"| HTTP 400 (payload hỏng, chặn ở API) | {Code(400)} | {sce
 md.AppendLine($"| Mã khác sau khi gửi lại | {(otherCodes.Count == 0 ? "0" : string.Join(", ", otherCodes))} | 0 |");
 md.AppendLine($"| Lần gửi lại (429 / 5xx) | {retries} | – |");
 md.AppendLine($"| Hàng đợi trống sau khi gửi | {(drained ? "có" : "KHÔNG (hết 10 phút)")} | có |");
+if (lateDuplicates > 0)
+{
+    md.AppendLine($"| Bản trùng gửi lại sau > 5 phút (HTTP 202) | {late202} / {lateSent} | {lateDuplicates} / {lateDuplicates} |");
+    md.AppendLine($"| → `Duplicate` ở DynamoDB (đếm log Processor) | {(lateDuplicateOutcomes?.ToString(inv) ?? "không đếm được")} | {lateSent} |");
+}
 md.AppendLine($"| History item trong DynamoDB | {history.Count} | {scenario.UniqueEvents} (1 / event) |");
 md.AppendLine($"| Sai lệch so với đáp án (status, deliveredAt, isLate, số history) | {mismatches.Count} | 0 |");
 md.AppendLine($"| DLQ trước → sau | {dlqBefore} → {dlqAfter} | không tăng |");
@@ -179,7 +232,8 @@ md.AppendLine($"| Quyết định của state machine | {string.Join(", ", outco
 md.AppendLine($"| Độ trễ receivedAt → processedAt (ms) p50 / p95 / max | {Ms(ChaosReconciler.Percentile(latencies, 50))} / {Ms(ChaosReconciler.Percentile(latencies, 95))} / {Ms(latencies.Count == 0 ? null : latencies.Max())} | – |");
 md.AppendLine();
 md.AppendLine("Ghi chú: độ trễ tính cho bản đầu tiên của mỗi event, gồm cả thời gian chờ trong hàng đợi (Processor chạy tối đa 2 luồng).");
-md.AppendLine("Bản trùng trong 5 phút bị SQS FIFO loại; bản trùng sau đó bị DynamoDB loại (`Duplicate`, không ghi history).");
+md.AppendLine("Chống trùng 2 lớp: bản trùng trong 5 phút bị SQS FIFO loại (cùng `MessageDeduplicationId`), không tới Processor;");
+md.AppendLine("bản trùng gửi lại sau > 5 phút tới Processor và bị DynamoDB chặn (`Duplicate`, không ghi history) – dòng \"Duplicate ở DynamoDB\".");
 if (!unexpected.IsEmpty || mismatches.Count > 0)
 {
     md.AppendLine();
@@ -216,7 +270,14 @@ async Task SendPhase(List<ChaosWebhook> webhooks)
     var tasks = new List<Task>();
     foreach (var w in webhooks)
     {
-        var due = TimeSpan.FromSeconds(dispatched / rate);   // steady pace across both phases
+        // Steady pace across both phases; after a stall the schedule moves forward (no catch-up burst).
+        var (due, shift) = ChaosSchedule.NextSend(dispatched, rate, paceShift, clock.Elapsed);
+        if (shift != paceShift)
+        {
+            stalls++;
+            Console.WriteLine($"    ! chậm {(shift - paceShift).TotalSeconds:0.0} s so với lịch → dời lịch, không gửi bù");
+            paceShift = shift;
+        }
         if (due > clock.Elapsed) await Task.Delay(due - clock.Elapsed);
         await gate.WaitAsync();
         dispatched++;
@@ -230,10 +291,21 @@ async Task SendPhase(List<ChaosWebhook> webhooks)
     await Task.WhenAll(tasks);
 }
 
-async Task Send(ChaosWebhook w)
+async Task Send(ChaosWebhook w) => Record(w, await Post(w));
+
+void Record(ChaosWebhook w, int code)
+{
+    var expected = w.Kind == WebhookKind.Valid ? 202 : 400;
+    codes.AddOrUpdate(code, 1, (_, n) => n + 1);
+    if (code == 202) lastAccepted[w.Body] = DateTimeOffset.UtcNow;   // the LAST copy decides when SQS forgets it
+    if (code != expected)
+        unexpected.Enqueue($"{w.Carrier} {w.Defect ?? "hợp lệ"} → {code} (cần {expected}) {w.ShipmentId}");
+}
+
+/// <summary>POST one webhook, retrying temporary failures; returns the final status code (0 = network error).</summary>
+async Task<int> Post(ChaosWebhook w)
 {
     const int maxAttempts = 5;
-    var expected = w.Kind == WebhookKind.Valid ? 202 : 400;
     for (var attempt = 1; ; attempt++)
     {
         int code;
@@ -264,10 +336,7 @@ async Task Send(ChaosWebhook w)
             continue;
         }
 
-        codes.AddOrUpdate(code, 1, (_, n) => n + 1);
-        if (code != expected)
-            unexpected.Enqueue($"{w.Carrier} {w.Defect ?? "hợp lệ"} → {code} (cần {expected}) {w.ShipmentId}");
-        return;
+        return code;
     }
 }
 
@@ -276,6 +345,29 @@ static async Task<int> QueueDepth(IAmazonSQS sqs, string url)
     var names = new List<string> { "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed" };
     var res = await sqs.GetQueueAttributesAsync(new GetQueueAttributesRequest { QueueUrl = url, AttributeNames = names });
     return names.Sum(n => res.Attributes.TryGetValue(n, out var v) ? int.Parse(v, CultureInfo.InvariantCulture) : 0);
+}
+
+// Log events arrive in CloudWatch a few seconds late → poll until the expected count shows up (max 2 minutes).
+static async Task<int> CountLogMatches(IAmazonCloudWatchLogs logs, string group, string pattern, DateTimeOffset from, int expected)
+{
+    var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(2);
+    while (true)
+    {
+        var count = 0;
+        string? token = null;
+        do
+        {
+            var res = await logs.FilterLogEventsAsync(new FilterLogEventsRequest
+            {
+                LogGroupName = group, StartTime = from.ToUnixTimeMilliseconds(), FilterPattern = pattern, NextToken = token
+            });
+            count += res.Events.Count;
+            token = res.NextToken;
+        } while (!string.IsNullOrEmpty(token));
+
+        if (count >= expected || DateTimeOffset.UtcNow > deadline) return count;
+        await Task.Delay(TimeSpan.FromSeconds(10));
+    }
 }
 
 // SQS counts are approximate → require two empty readings in a row.
@@ -300,7 +392,8 @@ static int Usage(string error)
           (gọi trực tiếp: dotnet run --project tools/ShipmentSla.Chaos -- --api URL --table T --queue-url U --dlq-url U
            [--webhooks 2500] [--seed n] [--rate 8] [--concurrency 4] [--dup-factor 5] [--late-pct 10]
            [--malformed-pct 1] [--run-id x] [--replayer-minute 10] [--no-wait] [--dry-run] [--out docs/evidence]
-           [--allow-late-deliveries]; secret qua biến môi trường CHAOS_WEBHOOK_SECRET)
+           [--allow-late-deliveries] [--late-duplicates 50 --processor-log-group /aws/lambda/<Processor>];
+           secret qua biến môi trường CHAOS_WEBHOOK_SECRET)
         """);
     return 2;
 }

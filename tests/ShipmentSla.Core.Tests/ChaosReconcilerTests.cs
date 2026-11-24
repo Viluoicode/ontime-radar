@@ -85,6 +85,55 @@ public class ChaosReconcilerTests
     }
 
     [Fact]
+    public void Late_duplicates_are_the_earliest_accepted_and_wait_past_the_sqs_dedup_window()
+    {
+        var t = Now;
+        var accepted = new Dictionary<string, DateTimeOffset>
+        {
+            ["c"] = t.AddSeconds(20), ["a"] = t, ["d"] = t.AddSeconds(30), ["b"] = t.AddSeconds(10)
+        };
+
+        var (bodies, notBefore) = ChaosSchedule.PickLateDuplicates(accepted, 3);
+
+        Assert.Equal(["a", "b", "c"], bodies);
+        // The LAST picked one (accepted at +20 s) must be > 5 min old: +20 s + 5 min + 30 s margin.
+        Assert.Equal(t.AddSeconds(20) + TimeSpan.FromMinutes(5.5), notBefore);
+    }
+
+    [Fact]
+    public void Pacing_keeps_a_steady_rate_when_on_time()
+    {
+        // 8 req/s: request 16 is due at 2 s; being 0.5 s early or late (≤ 1 s) keeps the schedule.
+        Assert.Equal((TimeSpan.FromSeconds(2), TimeSpan.Zero), ChaosSchedule.NextSend(16, 8, TimeSpan.Zero, TimeSpan.FromSeconds(1.5)));
+        Assert.Equal((TimeSpan.FromSeconds(2), TimeSpan.Zero), ChaosSchedule.NextSend(16, 8, TimeSpan.Zero, TimeSpan.FromSeconds(2.5)));
+    }
+
+    [Fact]
+    public void Pacing_after_a_stall_moves_the_schedule_instead_of_catching_up()
+    {
+        // Stalled 5 minutes at request 100 (due 12.5 s): send it now and keep 8 req/s from here on.
+        var elapsed = TimeSpan.FromSeconds(312.5);
+        var (due, shift) = ChaosSchedule.NextSend(100, 8, TimeSpan.Zero, elapsed);
+        Assert.Equal(elapsed, due);
+        Assert.Equal(TimeSpan.FromSeconds(300), shift);
+
+        // The next request is 1/8 s later – not immediately (that was the burst that hit the 429s).
+        Assert.Equal((elapsed + TimeSpan.FromSeconds(0.125), shift), ChaosSchedule.NextSend(101, 8, shift, elapsed));
+    }
+
+    [Fact]
+    public void No_late_duplicates_means_nothing_to_wait_for()
+    {
+        var (bodies, _) = ChaosSchedule.PickLateDuplicates(new Dictionary<string, DateTimeOffset> { ["a"] = Now }, 0);
+        Assert.Empty(bodies);
+    }
+
+    [Fact] // the default run with late duplicates (~6 min send + ~1 min) still fits between Replayer runs
+    public void A_seven_minute_run_fits_after_the_replayer() =>
+        Assert.Equal(TimeSpan.Zero,
+            ChaosSchedule.WaitBeforeStart(new DateTimeOffset(2026, 11, 24, 2, 13, 0, TimeSpan.Zero), 10, TimeSpan.FromMinutes(7)));
+
+    [Fact]
     public void A_run_longer_than_the_gap_between_replayer_runs_cannot_start() =>
         Assert.Null(ChaosSchedule.WaitBeforeStart(Now, 10, TimeSpan.FromMinutes(12)));
 }

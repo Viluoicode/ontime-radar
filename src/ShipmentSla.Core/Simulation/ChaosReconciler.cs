@@ -54,6 +54,40 @@ public static class ChaosSchedule
     /// <summary>Stop sending this long before the next Replayer run.</summary>
     public static readonly TimeSpan SafetyMargin = TimeSpan.FromMinutes(1);
 
+    /// <summary>SQS FIFO drops a repeated MessageDeduplicationId only within 5 minutes of the first send.</summary>
+    public static readonly TimeSpan SqsDedupWindow = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan DedupMargin = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Late duplicates: the <paramref name="count"/> bodies whose LAST accepted copy is oldest, and the moment from which
+    /// all of them are outside the SQS dedup window – resent then, they reach DynamoDB and must come back as Duplicate.
+    /// The last copy (not the first) matters: a copy sent after a window expired is delivered and opens a NEW
+    /// 5-minute window (measured 24/11: an 18-minute send let 61 copies through, and 9 of 50 resends timed from the
+    /// first copy were dropped by SQS).
+    /// </summary>
+    public static (IReadOnlyList<string> Bodies, DateTimeOffset NotBefore) PickLateDuplicates(
+        IReadOnlyDictionary<string, DateTimeOffset> lastAccepted, int count)
+    {
+        var picked = lastAccepted.OrderBy(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)
+            .Take(Math.Max(0, count)).ToList();
+        var notBefore = picked.Count == 0 ? DateTimeOffset.MinValue : picked[^1].Value + SqsDedupWindow + DedupMargin;
+        return (picked.Select(kv => kv.Key).ToList(), notBefore);
+    }
+
+    /// <summary>Behind schedule by more than this → drop the backlog instead of catching up.</summary>
+    public static readonly TimeSpan MaxLag = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Steady pacing: request <paramref name="index"/> is due at index / rate (+ <paramref name="shift"/>).
+    /// If the sender fell behind (machine asleep, slow network), the schedule is moved forward instead of sending the
+    /// backlog at full speed – catching up overran the 10 req/s throttle on 24/11 (≈ 200 × 429, 6 copies lost).
+    /// </summary>
+    public static (TimeSpan Due, TimeSpan Shift) NextSend(int index, double rate, TimeSpan shift, TimeSpan elapsed)
+    {
+        var due = TimeSpan.FromSeconds(index / rate) + shift;
+        return elapsed - due > MaxLag ? (elapsed, shift + (elapsed - due)) : (due, shift);
+    }
+
     /// <summary>
     /// How long to wait before starting a run of <paramref name="duration"/>. The Replayer starts at
     /// minute <paramref name="replayerMinute"/> of every 15-minute cycle (e.g. 10 → :10, :25, :40, :55 UTC).

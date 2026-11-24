@@ -10,6 +10,7 @@
   <ItemGroup>
     <!-- Same SDK v3.7 line as the rest of the solution. -->
     <PackageReference Include="AWSSDK.SQS" Version="3.7.*" />
+    <PackageReference Include="AWSSDK.CloudWatchLogs" Version="3.7.*" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\ShipmentSla.Core\ShipmentSla.Core.csproj" />
