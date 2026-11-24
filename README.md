@@ -9,6 +9,45 @@ Traffic thật hằng ngày đến từ **Replayer** phát lại ~99k đơn hàn
 
 → Value, người dùng, khách hàng mục tiêu: [docs/product.md](docs/product.md)
 
+## Kết quả (số đo thật – cập nhật 24/11/2026)
+
+Hệ thống chạy liên tục trên AWS (ap-southeast-1), nhận traffic từ Replayer mỗi 15 phút. Số liệu lấy bằng truy vấn
+chỉ đọc (Athena trên event lake, CloudWatch metric / alarm history, log Replayer).
+
+**Vận hành thật** – dữ liệu Olist thật phát lại (hãng / mã vận đơn / mốc trung gian là giả lập, xem [7b](#7b-giới-hạn-đã-biết)):
+
+| Chỉ số | Kết quả |
+| --- | --- |
+| Thời gian chạy | **16/11 → 24/11/2026: 9/9 ngày** có dữ liệu; **798 lượt** Replayer (mỗi 15 phút) |
+| Đã xử lý | **15.660 vận đơn, 78.397 sự kiện**; 15.246 đơn đã giao |
+| Lỗi Lambda | **0 lỗi** / ~ 104 nghìn lần chạy (API 87.824 · Processor 15.035 · Replayer 799) |
+| Lỗi 5xx của API | 102, chỉ trong 2 ngày: 55 ở lượt Replayer đầu tiên (16/11), 47 ở phép thử dồn 80 request (20/11). **0 từ 21/11** |
+| Mất dữ liệu | **0**: 13 / 798 lượt có 1 webhook bị từ chối (429) cả 5 lần → Replayer **không đi tiếp**, lượt sau gửi lại; 11 webhook gửi lại đó tới sau sự kiện mới hơn → lưu lịch sử, đánh `Stale`, không làm trạng thái đi lùi |
+| Toàn vẹn | Mỗi sự kiện đúng 1 dòng trong event lake (78.397 dòng = 78.397 `eventId`); DLQ **0 message** suốt thời gian chạy |
+| Throttling | 4xx ~ 500–700 / ngày từ 20/11 ≈ đúng số lần Replayer gửi lại sau `429` (vd. 22/11: 691 so với 689) → giới hạn 10 req/s đang chặn đúng việc, không phải lỗi |
+| Cảnh báo giả | Ngưỡng cũ (số đơn trễ / giờ): **20 lần báo động** từ 16/11 tới 19/11 13:30 (giờ VN). Đổi sang **tỉ lệ trễ, 2/3 khung 15 phút** (commit 19/11 13:30): **0 lần** từ 20/11 11:31 tới nay. Giữa 2 mốc có 5 lần – chưa xác định do deploy muộn hơn commit hay do cảnh 4 của `demo.ps1` (cố ý tạo trễ) |
+| Tỉ lệ giao trễ (đơn đã phát) | 572 / 15.246 = 3,75 % – **không** phải "tỉ lệ trễ của Olist" (Replayer phát theo ngày đặt hàng; toàn dataset 6,77 %) |
+
+**Tính đúng khi webhook lộn xộn** – chaos test, dữ liệu **giả lập** ([6b](#6b-chaos-test-webhook-lộn-xộn-có-đáp-án)):
+
+| Chỉ số | Kết quả |
+| --- | --- |
+| 2 lượt trên AWS (23–24/11) | 4.908 webhook trùng ~ 5 lần, xáo thứ tự, gửi muộn, 49 payload hỏng → **0 sai lệch** so với đáp án, DLQ 0 |
+| Chống trùng 2 lớp | Bản trùng trong 5 phút: SQS FIFO loại. Gửi lại sau 5 phút: **50 / 50** bị DynamoDB chặn (`Duplicate`) |
+| Bug tìm được | **F1**: payload sai kiểu → API trả `500` thay vì `400` (chạy lại phép thử với code cũ: 5 phản hồi `500`) → đã sửa, kiểm chứng trên AWS |
+| Độ trễ nhận → xử lý | p50 / p95 = **17 / 42 ms** (hàng đợi gần trống) |
+
+**Chất lượng & quy trình**
+
+| Chỉ số | Kết quả |
+| --- | --- |
+| Test tự động | **237 test** (không cần AWS / Docker), chạy ở mỗi push; có mutation test cho các vùng dễ mất dữ liệu |
+| Deploy | GitHub Actions + OIDC (không access key), **có bước duyệt**; chạy từ 20/11/2026 |
+| Quyết định & giới hạn | 4 [ADR](docs/adr/README.md); [giới hạn đã biết](#7b-giới-hạn-đã-biết) ghi rõ (R1–R2, D1–D3, S1–S6) |
+
+**Chi phí** – ⏳ *chờ số Cost Explorer* (ước tính 3–5 USD/tháng). Sẽ ghi: chi phí thật / tháng và
+**chi phí / 1.000 request API** (16–24/11: 90.928 request).
+
 ## Kiến trúc
 
 ![Sơ đồ kiến trúc: hãng vận chuyển và Replayer gửi webhook qua API Gateway, SQS FIFO, Processor ghi DynamoDB và S3; nhân viên dùng website trên CloudFront, đăng nhập Cognito, tra cứu DynamoDB và báo cáo Athena; CloudWatch cảnh báo qua SNS email](docs/diagrams/architecture.png)
